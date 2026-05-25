@@ -1,11 +1,18 @@
-"""s01: agent loop — LLM ↔ tools until stop."""
+"""s01: agent loop — LLM ↔ tools until stop (s03: permission gates)."""
 
 from .config import MODEL, client
+from .permissions import check_permission
 from .prompts import build_system_prompt
 from .tools import TOOL_HANDLERS, TOOLS
 
 
-def agent_loop(messages: list, *, verbose: bool = True) -> None:
+def agent_loop(
+    messages: list,
+    *,
+    verbose: bool = True,
+    interactive: bool = False,
+    review_mode: bool = False,
+) -> None:
     system = build_system_prompt()
     while True:
         response = client.messages.create(
@@ -26,6 +33,19 @@ def agent_loop(messages: list, *, verbose: bool = True) -> None:
                 continue
             if verbose:
                 print(f"\033[33m> {block.name}\033[0m")
+
+            if not check_permission(
+                block, interactive=interactive, review_mode=review_mode
+            ):
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": "Permission denied.",
+                    }
+                )
+                continue
+
             handler = TOOL_HANDLERS.get(block.name)
             output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
             if verbose:
