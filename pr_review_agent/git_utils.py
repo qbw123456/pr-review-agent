@@ -15,9 +15,11 @@ def collect_pr_context(workdir: Path, base: str = "main") -> str:
             cwd=workdir,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
-        out = (r.stdout + r.stderr).strip()
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
         return out[:30000] if out else "(no output)"
 
     sections.append(f"### git status\n```\n{run('git status -sb')}\n```")
