@@ -1,0 +1,78 @@
+# Auto-run PR Review Agent on pull requests targeting main.
+# Posts/updates a single PR comment with the review report.
+#
+# Required repo secrets:
+#   ANTHROPIC_API_KEY
+#   MODEL_ID
+# Optional:
+#   ANTHROPIC_BASE_URL  (e.g. https://open.bigmodel.cn/api/anthropic)
+
+name: PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: |
+          BASE="${{ github.event.pull_request.base.ref || 'main' }}"
+          # Local ref required for `git diff main...HEAD` in git_utils
+          git fetch origin "${BASE}:${BASE}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run PR review agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL_ID: ${{ secrets.MODEL_ID }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+        run: |
+          BASE="${{ github.event.pull_request.base.ref || 'main' }}"
+          python main.py review --base "${BASE}" --quiet-tools -o REVIEW.md
+
+      - name: Prepare PR comment body
+        if: github.event_name == 'pull_request'
+        run: |
+          {
+            echo "<!-- pr-review-agent -->"
+            echo "## 🤖 PR Review Agent（自动审查）"
+            echo ""
+            echo "审查范围：\`${{ github.event.pull_request.head.ref }}\` → \`${{ github.event.pull_request.base.ref }}\`"
+            echo ""
+            cat REVIEW.md
+          } > pr-review-comment.md
+
+      - name: Post or update PR comment
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: pr-review-comment.md
