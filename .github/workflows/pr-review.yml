@@ -50,6 +50,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run PR review agent
+        id: review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MODEL_ID: ${{ secrets.MODEL_ID }}
@@ -58,8 +59,19 @@ jobs:
           BASE="${{ github.event.pull_request.base.ref || 'main' }}"
           python main.py review --base "${BASE}" --quiet-tools -o REVIEW.md
 
+      - name: Upload review artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-report
+          path: REVIEW.md
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Prepare PR comment body
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request'
+        env:
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
         run: |
           {
             echo "<!-- pr-review-agent -->"
@@ -67,12 +79,28 @@ jobs:
             echo ""
             echo "审查范围：\`${{ github.event.pull_request.head.ref }}\` → \`${{ github.event.pull_request.base.ref }}\`"
             echo ""
-            cat REVIEW.md
+            if [ -f REVIEW.md ] && [ -s REVIEW.md ]; then
+              cat REVIEW.md
+            elif [ "$REVIEW_OUTCOME" = "failure" ]; then
+              echo "⚠️ **审查未成功完成**"
+              echo ""
+              echo "请到 [Actions 运行日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) 查看 \`Run PR review agent\` 步骤。"
+              echo ""
+              echo "常见原因：\`ANTHROPIC_API_KEY\` / \`MODEL_ID\` 未配置或无效、API 超时、配额不足。"
+              echo ""
+              echo "可在本次运行的 **Artifacts** 中下载 \`pr-review-report\`（若已生成部分输出）。"
+            else
+              echo "未生成审查报告（\`REVIEW.md\` 为空或不存在）。"
+            fi
           } > pr-review-comment.md
 
       - name: Post or update PR comment
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request'
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body-path: pr-review-comment.md
+
+      - name: Fail job if review failed
+        if: steps.review.outcome == 'failure'
+        run: exit 1

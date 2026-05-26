@@ -2,7 +2,7 @@
 
 基于 [learn-claude-code](https://github.com/anthropics/learn-claude-code) **s01 Agent Loop + s02 Tool Use + s03 Permission** 的 PR 代码审查 Agent。
 
-## 当前能力（v0.3）
+## 当前能力（v0.4）
 
 | 模块 | 对应章节 | 说明 |
 |------|----------|------|
@@ -12,6 +12,12 @@
 | `pr_review_agent/prompts.py` | — | PR 审查专用 system prompt |
 | `pr_review_agent/git_utils.py` | — | 预取 `git diff` 注入审查请求 |
 | `.github/workflows/pr-review.yml` | CI | PR 更新时自动 review 并评论 |
+
+### 可靠性（v0.4）
+
+- **空 diff**：相对 base 无变更时跳过 LLM，直接输出「无变更」报告
+- **Actions 失败**：仍在 PR 留简短失败说明；成功/失败均可下载 `pr-review-report` artifact
+- **审查深度**：提示词要求对每个变更的源码/配置文件至少 `read_file` 一次
 
 ### s03 权限行为
 

@@ -31,12 +31,30 @@ except ImportError:
     pass
 
 from pr_review_agent.config import WORKDIR, require_env
-from pr_review_agent.git_utils import build_review_request
+from pr_review_agent.git_utils import (
+    build_no_changes_report,
+    build_review_request,
+    has_pr_changes,
+)
 from pr_review_agent.loop import agent_loop, extract_final_text
+
+
+def _write_report(report: str, output: Path | None) -> None:
+    print("\n" + "=" * 60 + "\n")
+    print(report)
+    if output:
+        output.write_text(report, encoding="utf-8")
+        print(f"\n[Saved to {output}]")
 
 
 def cmd_review(base: str, output: Path | None, quiet_tools: bool) -> int:
     print(f"PR Review Agent — reviewing vs `{base}` at {WORKDIR}\n")
+
+    if not has_pr_changes(WORKDIR, base):
+        print(f"No changes vs `{base}` — skipping LLM review.\n")
+        _write_report(build_no_changes_report(base), output)
+        return 0
+
     messages = [{"role": "user", "content": build_review_request(base=base)}]
     agent_loop(
         messages,
@@ -45,12 +63,7 @@ def cmd_review(base: str, output: Path | None, quiet_tools: bool) -> int:
         review_mode=True,
     )
     report = extract_final_text(messages)
-    print("\n" + "=" * 60 + "\n")
-    print(report)
-
-    if output:
-        output.write_text(report, encoding="utf-8")
-        print(f"\n[Saved to {output}]")
+    _write_report(report, output)
     return 0
 
 
