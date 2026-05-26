@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PR Review Agent — MVP (s01 agent loop + s02 tools)
+PR Review Agent — s01 agent loop + s02 tools + s03 permissions
 
 Usage:
   pip install -r requirements.txt
@@ -38,7 +38,12 @@ from pr_review_agent.loop import agent_loop, extract_final_text
 def cmd_review(base: str, output: Path | None, quiet_tools: bool) -> int:
     print(f"PR Review Agent — reviewing vs `{base}` at {WORKDIR}\n")
     messages = [{"role": "user", "content": build_review_request(base=base)}]
-    agent_loop(messages, verbose=not quiet_tools)
+    agent_loop(
+        messages,
+        verbose=not quiet_tools,
+        interactive=False,
+        review_mode=True,
+    )
     report = extract_final_text(messages)
     print("\n" + "=" * 60 + "\n")
     print(report)
@@ -50,7 +55,7 @@ def cmd_review(base: str, output: Path | None, quiet_tools: bool) -> int:
 
 
 def cmd_chat() -> int:
-    print("PR Review Agent — interactive (s01+s02 tools)")
+    print("PR Review Agent — interactive (s01+s02+s03)")
     print(f"Workspace: {WORKDIR}")
     print("Commands: review  → quick review vs main")
     print("          q / exit → quit\n")
@@ -65,18 +70,19 @@ def cmd_chat() -> int:
         stripped = query.strip()
         if stripped.lower() in ("q", "exit", ""):
             break
-        if stripped.lower() == "review":
+        is_review = stripped.lower() == "review"
+        if is_review:
             query = build_review_request(base="main")
 
         history.append({"role": "user", "content": query})
-        agent_loop(history)
+        agent_loop(history, interactive=True, review_mode=is_review)
         print(extract_final_text(history))
         print()
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PR Review Agent (s01 + s02)")
+    parser = argparse.ArgumentParser(description="PR Review Agent (s01 + s02 + s03)")
     sub = parser.add_subparsers(dest="command")
 
     review_p = sub.add_parser("review", help="Review current branch vs base")
