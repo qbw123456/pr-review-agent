@@ -70,6 +70,8 @@ python main.py chat
 
 手动触发：Actions 页选择 **PR Review** → **Run workflow**（需在有 PR 上下文时用于调试）。
 
+> 提示：仅 `git push` 不会触发 PR 评论，须存在 **Open** 的 PR（`feature` → `main`）；`pr-review.yml` 须在 `main` 上。若无 Checks，可 Close → Reopen 或再 push。
+
 ## 项目结构
 
 ```
