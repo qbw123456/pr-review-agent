@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PR Review Agent — s01 agent loop + s02 tools + s03 permissions
+PR Review Agent — s01 loop + s02 tools + s03 permissions + s06 per-file subagents
 
 Usage:
   pip install -r requirements.txt
@@ -37,6 +37,7 @@ from pr_review_agent.git_utils import (
     has_pr_changes,
 )
 from pr_review_agent.loop import agent_loop, extract_final_text
+from pr_review_agent.orchestrator import run_pr_review_with_subagents
 
 
 def _write_report(report: str, output: Path | None) -> None:
@@ -47,22 +48,33 @@ def _write_report(report: str, output: Path | None) -> None:
         print(f"\n[Saved to {output}]")
 
 
-def cmd_review(base: str, output: Path | None, quiet_tools: bool) -> int:
-    print(f"PR Review Agent — reviewing vs `{base}` at {WORKDIR}\n")
+def cmd_review(
+    base: str,
+    output: Path | None,
+    quiet_tools: bool,
+    *,
+    legacy_single_agent: bool,
+) -> int:
+    mode = "单 Agent（旧）" if legacy_single_agent else "子 Agent 分文件 + 主 Agent 集成"
+    print(f"PR Review Agent — {mode}，对比 `{base}` @ {WORKDIR}\n")
 
     if not has_pr_changes(WORKDIR, base):
         print(f"No changes vs `{base}` — skipping LLM review.\n")
         _write_report(build_no_changes_report(base), output)
         return 0
 
-    messages = [{"role": "user", "content": build_review_request(base=base)}]
-    agent_loop(
-        messages,
-        verbose=not quiet_tools,
-        interactive=False,
-        review_mode=True,
-    )
-    report = extract_final_text(messages)
+    if legacy_single_agent:
+        messages = [{"role": "user", "content": build_review_request(base=base)}]
+        agent_loop(
+            messages,
+            verbose=not quiet_tools,
+            interactive=False,
+            review_mode=True,
+        )
+        report = extract_final_text(messages)
+    else:
+        report = run_pr_review_with_subagents(base, verbose=not quiet_tools)
+
     _write_report(report, output)
     return 0
 
@@ -83,19 +95,22 @@ def cmd_chat() -> int:
         stripped = query.strip()
         if stripped.lower() in ("q", "exit", ""):
             break
-        is_review = stripped.lower() == "review"
-        if is_review:
-            query = build_review_request(base="main")
+        if stripped.lower() == "review":
+            report = run_pr_review_with_subagents("main", verbose=True)
+            print("\n" + report + "\n")
+            continue
 
         history.append({"role": "user", "content": query})
-        agent_loop(history, interactive=True, review_mode=is_review)
+        agent_loop(history, interactive=True, review_mode=False)
         print(extract_final_text(history))
         print()
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PR Review Agent (s01 + s02 + s03)")
+    parser = argparse.ArgumentParser(
+        description="PR Review Agent (s01 + s02 + s03 + s06 subagents)"
+    )
     sub = parser.add_subparsers(dest="command")
 
     review_p = sub.add_parser("review", help="Review current branch vs base")
@@ -106,6 +121,11 @@ def main() -> int:
     review_p.add_argument(
         "--quiet-tools", action="store_true", help="Hide tool call previews"
     )
+    review_p.add_argument(
+        "--legacy-single-agent",
+        action="store_true",
+        help="Use pre-v0.6 single-agent loop (no per-file subagents)",
+    )
 
     sub.add_parser("chat", help="Interactive chat with review tools")
 
@@ -113,7 +133,12 @@ def main() -> int:
     if args.command in ("review", "chat"):
         require_env()
     if args.command == "review":
-        return cmd_review(args.base, args.output, args.quiet_tools)
+        return cmd_review(
+            args.base,
+            args.output,
+            args.quiet_tools,
+            legacy_single_agent=args.legacy_single_agent,
+        )
     if args.command == "chat":
         return cmd_chat()
 

@@ -1,5 +1,7 @@
 """s01: agent loop — LLM ↔ tools until stop (s03: permission gates)."""
 
+from __future__ import annotations
+
 from .config import MODEL, client
 from .permissions import check_permission
 from .prompts import build_system_prompt
@@ -9,17 +11,24 @@ from .tools import TOOL_HANDLERS, TOOLS
 def agent_loop(
     messages: list,
     *,
+    system: str | None = None,
+    tools: list | None = None,
+    tool_handlers: dict | None = None,
     verbose: bool = True,
     interactive: bool = False,
     review_mode: bool = False,
+    max_turns: int = 50,
 ) -> None:
-    system = build_system_prompt()
-    while True:
+    system = system or build_system_prompt()
+    tools = tools or TOOLS
+    handlers = tool_handlers or TOOL_HANDLERS
+
+    for _ in range(max_turns):
         response = client.messages.create(
             model=MODEL,
             system=system,
             messages=messages,
-            tools=TOOLS,
+            tools=tools,
             max_tokens=8000,
         )
         messages.append({"role": "assistant", "content": response.content})
@@ -46,7 +55,7 @@ def agent_loop(
                 )
                 continue
 
-            handler = TOOL_HANDLERS.get(block.name)
+            handler = handlers.get(block.name)
             output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
             if verbose:
                 print(str(output)[:200])
@@ -58,6 +67,9 @@ def agent_loop(
                 }
             )
         messages.append({"role": "user", "content": results})
+
+    if verbose:
+        print(f"\033[33m⚠ 达到最大轮次 ({max_turns})，停止工具循环\033[0m")
 
 
 def extract_final_text(messages: list) -> str:
