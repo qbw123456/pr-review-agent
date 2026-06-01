@@ -32,7 +32,10 @@ except ImportError:
 
 from pr_review_agent.config import WORKDIR, require_env
 from pr_review_agent.git_utils import build_no_changes_report, build_review_request, has_pr_changes
+import time
+
 from pr_review_agent.loop import agent_loop, extract_final_text
+from pr_review_agent.usage_stats import ReviewRunStats, UsageTracker, print_usage_report
 from pr_review_agent.orchestrator import run_pr_review_with_subagents
 from pr_review_agent.review_strategy import (
     normalize_review_mode,
@@ -69,11 +72,18 @@ def run_review(
 
     if use_legacy:
         messages = [{"role": "user", "content": build_review_request(base=base)}]
+        tracker = UsageTracker(label="legacy")
+        wall_start = time.perf_counter()
         agent_loop(
             messages,
             verbose=not quiet_tools,
             interactive=False,
             review_mode=True,
+            usage=tracker,
+        )
+        tracker.wall_sec = time.perf_counter() - wall_start
+        print_usage_report(
+            ReviewRunStats(route=f"legacy（{route_reason}）", phases=[tracker])
         )
         return extract_final_text(messages)
 
