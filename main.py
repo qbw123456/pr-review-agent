@@ -6,7 +6,7 @@ Usage:
   pip install -r requirements.txt
   copy .env.example to .env and fill in keys
 
-  # Review current branch vs main
+  # Review vs main (auto: ≤6 files and each diff ≤8KB → legacy, else subagents)
   python main.py review
   python main.py review --base develop --output REVIEW.md
 
@@ -31,13 +31,14 @@ except ImportError:
     pass
 
 from pr_review_agent.config import WORKDIR, require_env
-from pr_review_agent.git_utils import (
-    build_no_changes_report,
-    build_review_request,
-    has_pr_changes,
-)
+from pr_review_agent.git_utils import build_no_changes_report, build_review_request, has_pr_changes
 from pr_review_agent.loop import agent_loop, extract_final_text
 from pr_review_agent.orchestrator import run_pr_review_with_subagents
+from pr_review_agent.review_strategy import (
+    normalize_review_mode,
+    resolve_use_legacy,
+    run_label,
+)
 
 
 def _write_report(report: str, output: Path | None) -> None:
@@ -48,22 +49,25 @@ def _write_report(report: str, output: Path | None) -> None:
         print(f"\n[Saved to {output}]")
 
 
-def cmd_review(
+def run_review(
     base: str,
-    output: Path | None,
-    quiet_tools: bool,
     *,
-    legacy_single_agent: bool,
-) -> int:
-    mode = "单 Agent（旧）" if legacy_single_agent else "子 Agent 分文件 + 主 Agent 集成"
-    print(f"PR Review Agent — {mode}，对比 `{base}` @ {WORKDIR}\n")
+    mode: str = "auto",
+    legacy_flag: bool = False,
+    quiet_tools: bool = False,
+    workers: int | None = None,
+) -> str:
+    """Run PR review; returns Markdown report text."""
+    review_mode = normalize_review_mode(mode, legacy_flag=legacy_flag)
+    use_legacy, route_reason, _n = resolve_use_legacy(base, review_mode)
+
+    print(f"PR Review Agent — {run_label(use_legacy)}，对比 `{base}` @ {WORKDIR}")
+    print(f"路由: {route_reason}\n")
 
     if not has_pr_changes(WORKDIR, base):
-        print(f"No changes vs `{base}` — skipping LLM review.\n")
-        _write_report(build_no_changes_report(base), output)
-        return 0
+        return build_no_changes_report(base)
 
-    if legacy_single_agent:
+    if use_legacy:
         messages = [{"role": "user", "content": build_review_request(base=base)}]
         agent_loop(
             messages,
@@ -71,10 +75,29 @@ def cmd_review(
             interactive=False,
             review_mode=True,
         )
-        report = extract_final_text(messages)
-    else:
-        report = run_pr_review_with_subagents(base, verbose=not quiet_tools)
+        return extract_final_text(messages)
 
+    return run_pr_review_with_subagents(
+        base, verbose=not quiet_tools, max_workers=workers
+    )
+
+
+def cmd_review(
+    base: str,
+    output: Path | None,
+    quiet_tools: bool,
+    *,
+    mode: str,
+    legacy_flag: bool,
+    workers: int | None,
+) -> int:
+    report = run_review(
+        base,
+        mode=mode,
+        legacy_flag=legacy_flag,
+        quiet_tools=quiet_tools,
+        workers=workers,
+    )
     _write_report(report, output)
     return 0
 
@@ -82,7 +105,7 @@ def cmd_review(
 def cmd_chat() -> int:
     print("PR Review Agent — interactive (s01+s02+s03)")
     print(f"Workspace: {WORKDIR}")
-    print("Commands: review  → quick review vs main")
+    print("Commands: review  → auto review vs main")
     print("          q / exit → quit\n")
 
     history: list = []
@@ -96,7 +119,7 @@ def cmd_chat() -> int:
         if stripped.lower() in ("q", "exit", ""):
             break
         if stripped.lower() == "review":
-            report = run_pr_review_with_subagents("main", verbose=True)
+            report = run_review("main", mode="auto", quiet_tools=False)
             print("\n" + report + "\n")
             continue
 
@@ -122,9 +145,28 @@ def main() -> int:
         "--quiet-tools", action="store_true", help="Hide tool call previews"
     )
     review_p.add_argument(
+        "--mode",
+        choices=["auto", "legacy", "subagent"],
+        default="auto",
+        help=(
+            "auto: legacy when ≤N files and each diff ≤8KB, else subagents "
+            "(N=REVIEW_LEGACY_MAX_FILES or 6)"
+        ),
+    )
+    review_p.add_argument(
         "--legacy-single-agent",
         action="store_true",
-        help="Use pre-v0.6 single-agent loop (no per-file subagents)",
+        help="Same as --mode legacy (deprecated alias)",
+    )
+    review_p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Parallel subagent workers (subagent path only; default 4, "
+            "env REVIEW_SUBAGENT_WORKERS; use 1 for serial)"
+        ),
     )
 
     sub.add_parser("chat", help="Interactive chat with review tools")
@@ -137,7 +179,9 @@ def main() -> int:
             args.base,
             args.output,
             args.quiet_tools,
-            legacy_single_agent=args.legacy_single_agent,
+            mode=args.mode,
+            legacy_flag=args.legacy_single_agent,
+            workers=args.workers,
         )
     if args.command == "chat":
         return cmd_chat()

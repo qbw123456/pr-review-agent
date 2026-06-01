@@ -2,7 +2,7 @@
 
 基于 [learn-claude-code](https://github.com/anthropics/learn-claude-code) **s01 Agent Loop + s02 Tool Use + s03 Permission + s06 Subagent** 的 PR 代码审查 Agent。
 
-## 当前能力（v0.6）
+## 当前能力（v0.8）
 
 | 模块 | 对应章节 | 说明 |
 |------|----------|------|
@@ -11,31 +11,31 @@
 | `pr_review_agent/permissions.py` | s03 | 三道闸门：硬拒绝 / 规则匹配 / 用户确认 |
 | `pr_review_agent/git_utils.py` | s08 思路 | 按文件分块 inline diff；轻量上下文给集成阶段 |
 | `pr_review_agent/subagent.py` | s06 | **每变更文件**独立子 Agent：全文 + diff + 最多 2 个关联文件 |
-| `pr_review_agent/orchestrator.py` | s06 | 子 Agent 汇总 → **主 Agent 集成**跨文件风险 |
+| `pr_review_agent/orchestrator.py` | s06 | **并行**子 Agent（默认 4 workers）→ 主 Agent 集成 |
 | `pr_review_agent/prompts.py` | — | 子 Agent / 集成 / 旧版单 Agent 提示词 |
 | `.github/workflows/pr-review.yml` | CI | PR 更新时自动 review 并评论 |
 
-### 审查流程（默认 `review`）
+### 审查流程（默认 `review --mode auto`）
 
 ```text
+auto 分流（须同时满足才走 legacy）：
+  · 可审查文件数 ≤ 6（REVIEW_LEGACY_MAX_FILES 可调）
+  · 每个文件的 git diff ≤ 8KB（与首条 inline PER_FILE_MAX 一致）
+  否则 → 子 Agent 分文件 + 主 Agent 集成
+  legacy：首条 inline diff 分块 8KB/100KB，一条对话审完
+
+大 PR（subagent）路径：
 1. 列出可审查的变更文件（.py / .ts / .yaml …，跳过 lock/二进制）
-2. 每个文件 → 子 Agent（独立 messages）
-      · read_file 目标文件全文（大文件可结合 diff 局部读）
-      · bash git diff 补全补丁
-      · 必要时最多再 read 2 个直接关联文件
-      · 输出该文件的 Markdown 摘要
-3. 主 Agent（集成）
-      · 只接收各文件摘要 + 轻量 git stat
-      · 合并发现、检查跨文件矛盾（bash/glob 快速核对）
-      · 输出最终 ## 总结 / ## 发现 / ## 结论
+2. 每个文件 → 子 Agent（独立 messages，**ThreadPool 并行**，默认 4 workers）
+3. 主 Agent 合并摘要 + 跨文件风险 → 最终报告
 ```
 
 ### 可靠性
 
 - **空 diff**：无变更时跳过 LLM
-- **大 PR**：单文件子 Agent 内可持全文；主对话不堆所有 `read_file` 正文
-- **超 50 个可审查文件**：只审前 50，其余在报告中提示人工复查
-- **回退**：`review --legacy-single-agent` 使用 v0.5 单 Agent + inline diff 分块
+- **auto 分流**：小 PR 且单文件 diff 不大 → legacy；文件多或单文件 diff 过大 → subagent
+- **超 50 个可审查文件**（subagent）：只审前 50，其余在报告中提示人工复查
+- **手动覆盖**：`--mode legacy` / `--mode subagent`（`--legacy-single-agent` 等同 legacy）
 
 ### s03 权限行为
 
@@ -56,15 +56,18 @@ copy .env.example .env   # 填入 ANTHROPIC_API_KEY 和 MODEL_ID
 在 **Git 仓库根目录** 下运行：
 
 ```bash
-# 默认：子 Agent 分文件审查 + 主 Agent 集成
+# 默认 auto：≤6 文件且单文件 diff ≤8KB → legacy，否则 subagent
 python main.py review
 
 python main.py review --base develop --output REVIEW.md
 
-# 旧版单 Agent（inline diff 分块，主对话内 read 所有文件）
-python main.py review --legacy-single-agent
+python main.py review --mode subagent    # 强制分文件子 Agent
+python main.py review --workers 8       # 并行子 Agent（仅 subagent 路径）
+python main.py review --workers 1       # 串行子 Agent（保留逐文件工具日志）
+python main.py review --mode legacy      # 强制单 Agent + diff 分块
+python main.py review --legacy-single-agent   # 同上（兼容旧参数）
 
-python main.py chat   # 输入 review 触发分文件审查
+python main.py chat   # 输入 review 走 auto 分流
 ```
 
 ## GitHub Actions（PR 自动审查）
@@ -85,6 +88,7 @@ pr-review-agent/
 │   ├── permissions.py
 │   ├── prompts.py
 │   ├── git_utils.py
+│   ├── review_strategy.py  # auto / legacy / subagent 分流
 │   ├── subagent.py       # s06 单文件审查
 │   └── orchestrator.py   # s06 编排 + 集成
 ├── requirements.txt
@@ -101,4 +105,4 @@ pr-review-agent/
 
 ## 环境变量
 
-见 `.env.example`：`ANTHROPIC_API_KEY`、`MODEL_ID` 必填；`ANTHROPIC_BASE_URL` 可选。
+见 `.env.example`：`ANTHROPIC_API_KEY`、`MODEL_ID` 必填；`ANTHROPIC_BASE_URL` 可选；`REVIEW_SUBAGENT_WORKERS`（默认 4）控制并行子 Agent 数。

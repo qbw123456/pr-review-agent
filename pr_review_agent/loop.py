@@ -19,9 +19,14 @@ def agent_loop(
     review_mode: bool = False,
     max_turns: int = 50,
 ) -> None:
-    system = system or build_system_prompt()
-    tools = tools or TOOLS
-    handlers = tool_handlers or TOOL_HANDLERS
+    if system is None:
+        system = build_system_prompt()
+    if tools is None:
+        tools = TOOLS
+    if tool_handlers is None:
+        handlers = TOOL_HANDLERS
+    else:
+        handlers = tool_handlers
 
     for _ in range(max_turns):
         response = client.messages.create(

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from .config import WORKDIR
 
 MAX_RELATED_FILES = 2
@@ -165,18 +163,3 @@ Subagents already read each target file (full content when reasonable) and up to
 {light_context}
 
 Produce the complete Markdown report (## 总结 / ## 变更文件 / ## 发现 / ## 结论)."""
-
-
-def build_review_request(base: str = "main") -> str:
-    from .git_utils import collect_pr_context
-
-    return f"""Review the current branch changes against `{base}`.
-
-Git context below uses **per-file chunked diffs** (not one monolithic diff).
-Paths marked **truncated** or listed under **omitted / not inlined** are incomplete here —
-you MUST `read_file` (and/or `git diff {base}...HEAD -- <path>`) before the final report.
-You must read_file every changed reviewable source/config file (see system prompt).
-
-{collect_pr_context(Path.cwd(), base=base)}
-
-Produce the structured Markdown review report defined in your instructions."""
