@@ -1,31 +1,49 @@
 # PR Review Agent
 
-基于 [learn-claude-code](https://github.com/anthropics/learn-claude-code) **s01 Agent Loop + s02 Tool Use + s03 Permission** 的 PR 代码审查 Agent。
+基于 [learn-claude-code](https://github.com/anthropics/learn-claude-code) **s01 Agent Loop + s02 Tool Use + s03 Permission + s06 Subagent** 的 PR 代码审查 Agent。
 
-## 当前能力（v0.4）
+## 当前能力（v0.8）
 
 | 模块 | 对应章节 | 说明 |
 |------|----------|------|
-| `pr_review_agent/loop.py` | s01 | 多轮 tool loop |
-| `pr_review_agent/tools.py` | s02 | bash / read_file / write_file / edit_file / glob + `safe_path` |
+| `pr_review_agent/loop.py` | s01 | 多轮 tool loop（可注入不同 tools/system） |
+| `pr_review_agent/tools.py` | s02 | bash / read_file / write_file / edit_file / glob |
 | `pr_review_agent/permissions.py` | s03 | 三道闸门：硬拒绝 / 规则匹配 / 用户确认 |
-| `pr_review_agent/prompts.py` | — | PR 审查专用 system prompt |
-| `pr_review_agent/git_utils.py` | — | 预取 `git diff` 注入审查请求 |
+| `pr_review_agent/git_utils.py` | s08 思路 | 按文件分块 inline diff；轻量上下文给集成阶段 |
+| `pr_review_agent/subagent.py` | s06 | **每变更文件**独立子 Agent：全文 + diff + 最多 2 个关联文件 |
+| `pr_review_agent/orchestrator.py` | s06 | **并行**子 Agent（默认 4 workers）→ 主 Agent 集成 |
+| `pr_review_agent/prompts.py` | — | 子 Agent / 集成 / 旧版单 Agent 提示词 |
 | `.github/workflows/pr-review.yml` | CI | PR 更新时自动 review 并评论 |
 
-### 可靠性（v0.4）
+### 审查流程（默认 `review --mode auto`）
 
-- **空 diff**：相对 base 无变更时跳过 LLM，直接输出「无变更」报告
-- **Actions 失败**：仍在 PR 留简短失败说明；成功/失败均可下载 `pr-review-report` artifact
-- **审查深度**：提示词要求对每个变更的源码/配置文件至少 `read_file` 一次
+```text
+auto 分流（须同时满足才走 legacy）：
+  · 可审查文件数 ≤ 6（REVIEW_LEGACY_MAX_FILES 可调）
+  · 每个文件的 git diff ≤ 8KB（与首条 inline PER_FILE_MAX 一致）
+  否则 → 子 Agent 分文件 + 主 Agent 集成
+  legacy：首条 inline diff 分块 8KB/100KB，一条对话审完
+
+大 PR（subagent）路径：
+1. 列出可审查的变更文件（.py / .ts / .yaml …，跳过 lock/二进制）
+2. 每个文件 → 子 Agent（独立 messages，**ThreadPool 并行**，默认 4 workers）
+3. 主 Agent 合并摘要 + 跨文件风险 → 最终报告
+```
+
+### 可靠性
+
+- **空 diff**：无变更时跳过 LLM
+- **auto 分流**：小 PR 且单文件 diff 不大 → legacy；文件多或单文件 diff 过大 → subagent
+- **超 50 个可审查文件**（subagent）：只审前 50，其余在报告中提示人工复查
+- **手动覆盖**：`--mode legacy` / `--mode subagent`（`--legacy-single-agent` 等同 legacy）
 
 ### s03 权限行为
 
 | 模式 | 行为 |
 |------|------|
-| `review` | 禁止 `write_file`/`edit_file`；危险 `bash` 自动拒绝；不弹 `[y/N]` |
-| `chat` | 写仓库外 / 危险 bash 可 `Allow? [y/N]` 确认 |
-| `chat` + 输入 `review` | 与 `review` 命令相同的只读策略 |
+| `review` | 禁止 `write_file`/`edit_file`；危险 `bash` 自动拒绝 |
+| `chat` | 输入 `review` 走与子 Agent 相同的分文件流程 |
+| `chat` 其它 | 交互式单 Agent，可写文件（需确认） |
 
 ## 快速开始
 
@@ -35,70 +53,56 @@ pip install -r requirements.txt
 copy .env.example .env   # 填入 ANTHROPIC_API_KEY 和 MODEL_ID
 ```
 
-在 **Git 仓库根目录** 下运行（或 `cd` 到目标仓库）：
+在 **Git 仓库根目录** 下运行：
 
 ```bash
-# 审查当前分支相对 main 的改动
-python e:\agent_demo\pr-review-agent\main.py review
+# 默认 auto：≤6 文件且单文件 diff ≤8KB → legacy，否则 subagent
+python main.py review
 
-# 指定 base 分支并保存报告
 python main.py review --base develop --output REVIEW.md
 
-# 交互模式（输入 review 可快速审查）
-python main.py chat
+python main.py review --mode subagent    # 强制分文件子 Agent
+python main.py review --workers 8       # 并行子 Agent（仅 subagent 路径）
+python main.py review --workers 1       # 串行子 Agent（保留逐文件工具日志）
+python main.py review --mode legacy      # 强制单 Agent + diff 分块
+python main.py review --legacy-single-agent   # 同上（兼容旧参数）
+
+python main.py chat   # 输入 review 走 auto 分流
 ```
 
 ## GitHub Actions（PR 自动审查）
 
-向 **feature → main** 的 Pull Request 在 **打开 / 更新** 时会自动：
+PR **打开 / 更新** 时对 base 分支（通常 `main`）运行 `python main.py review`，在 PR 上更新一条审查评论。
 
-1. checkout PR 分支代码  
-2. 运行 `python main.py review`（相对 base 分支的 diff）  
-3. 在 PR 页面 **创建或更新一条** 审查评论（不会每次 push 刷屏）
-
-### 配置仓库 Secrets
-
-在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加：
-
-| Secret | 必填 | 说明 |
-|--------|------|------|
-| `ANTHROPIC_API_KEY` | 是 | 大模型 API Key |
-| `MODEL_ID` | 是 | 如 `glm-5` 或 `claude-sonnet-4-6` |
-| `ANTHROPIC_BASE_URL` | 否 | 智谱等兼容网关时填写 |
-
-合并 workflow 到 `main` 后，对 targeting `main` 的 PR 即会生效。
-
-手动触发：Actions 页选择 **PR Review** → **Run workflow**（需在有 PR 上下文时用于调试）。
-
-> 提示：仅 `git push` 不会触发 PR 评论，须存在 **Open** 的 PR（`feature` → `main`）；`pr-review.yml` 须在 `main` 上。若无 Checks，可 Close → Reopen 或再 push。
+Secrets：`ANTHROPIC_API_KEY`、`MODEL_ID`；可选 `ANTHROPIC_BASE_URL`（智谱等）。
 
 ## 项目结构
 
 ```
 pr-review-agent/
-├── main.py                 # CLI 入口
+├── main.py
 ├── pr_review_agent/
-│   ├── config.py           # 环境变量、Anthropic client
-│   ├── loop.py             # s01 agent loop
-│   ├── tools.py            # s02 工具与分发
-│   ├── permissions.py      # s03 权限闸门
-│   ├── prompts.py          # 审查提示词
-│   └── git_utils.py        # git diff 预取
+│   ├── config.py
+│   ├── loop.py
+│   ├── tools.py
+│   ├── permissions.py
+│   ├── prompts.py
+│   ├── git_utils.py
+│   ├── review_strategy.py  # auto / legacy / subagent 分流
+│   ├── subagent.py       # s06 单文件审查
+│   └── orchestrator.py   # s06 编排 + 集成
 ├── requirements.txt
-├── .env.example
 └── .github/workflows/pr-review.yml
 ```
 
-## 后续扩展路线图
+## 后续扩展
 
 | 章节 | 计划 |
 |------|------|
-| s07 Skill Loading | 加载 `code-review` SKILL |
-| s08 Context Compact | 大 diff 压缩 |
-| s10 System Prompt | 提示词版本管理 |
-| s06 Subagent | 大 PR 按文件分审 |
-| s19 MCP | 外接工具（可选，PR 自动审查已用 Actions 实现） |
+| s08 Context Compact | `chat` 长会话可选 L2/L3 |
+| s07 Skill Loading | `code-review` SKILL |
+| s19 MCP | 外接工具（可选） |
 
 ## 环境变量
 
-见 `.env.example`：`ANTHROPIC_API_KEY`、`MODEL_ID` 必填；`ANTHROPIC_BASE_URL` 可选（兼容 API 网关）。
+见 `.env.example`：`ANTHROPIC_API_KEY`、`MODEL_ID` 必填；`ANTHROPIC_BASE_URL` 可选；`REVIEW_SUBAGENT_WORKERS`（默认 4）控制并行子 Agent 数。

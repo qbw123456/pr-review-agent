@@ -149,3 +149,22 @@ TOOL_HANDLERS = {
     "edit_file": run_edit,
     "glob": run_glob,
 }
+
+# s06: subagent — read-only; no write/edit
+SUBAGENT_TOOLS = [
+    t for t in TOOLS if t["name"] in ("bash", "read_file", "glob")
+]
+SUBAGENT_TOOL_HANDLERS = {
+    "bash": run_bash,
+    "read_file": run_read,
+    "glob": run_glob,
+}
+
+# Integration agent — no bulk read_file; bash/glob for cross-file checks only
+INTEGRATION_TOOLS = [
+    t for t in TOOLS if t["name"] in ("bash", "glob")
+]
+INTEGRATION_TOOL_HANDLERS = {
+    "bash": run_bash,
+    "glob": run_glob,
+}
