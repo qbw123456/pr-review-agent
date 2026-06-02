@@ -2,6 +2,18 @@
 
 基于 [learn-claude-code](https://github.com/anthropics/learn-claude-code) **s01 Agent Loop + s02 Tool Use + s03 Permission + s06 Subagent** 的 PR 代码审查 Agent。
 
+## 效果演示
+
+PR 打开或更新时，GitHub Actions 运行 `python main.py review`，在 PR 上更新一条 **🤖 PR Review Agent（自动审查）** 评论（`feature` → `main`）。
+
+**完整审查示例**（子 Agent 分文件 + 主 Agent 集成）：
+
+![PR Review Agent 完整审查评论](docs/pr-review-comment-full.png)
+
+**API 限流时的表现**（并行子 Agent 易触发提供商 RPM/TPM；已支持 `REVIEW_API_*` 退避重试，可调低 `REVIEW_SUBAGENT_WORKERS`）：
+
+![PR Review Agent 限流示例](docs/pr-review-rate-limit.jpg)
+
 ## 当前能力（v0.8）
 
 | 模块 | 对应章节 | 说明 |
@@ -36,6 +48,8 @@ auto 分流（须同时满足才走 legacy）：
 - **auto 分流**：小 PR 且单文件 diff 不大 → legacy；文件多或单文件 diff 过大 → subagent
 - **超 50 个可审查文件**（subagent）：只审前 50，其余在报告中提示人工复查
 - **手动覆盖**：`--mode legacy` / `--mode subagent`（`--legacy-single-agent` 等同 legacy）
+- **API 限流重试**：`agent_loop` 对 `messages.create` 自动退避重试（见 `REVIEW_API_*` 环境变量）
+- **usage 统计**：审查结束打印每阶段 calls/tokens/耗时（`REVIEW_LOG_USAGE`，子 Agent 并行完成行也会带简要数据）
 
 ### s03 权限行为
 
@@ -89,6 +103,7 @@ pr-review-agent/
 │   ├── prompts.py
 │   ├── git_utils.py
 │   ├── review_strategy.py  # auto / legacy / subagent 分流
+│   ├── usage_stats.py      # token / 耗时汇总
 │   ├── subagent.py       # s06 单文件审查
 │   └── orchestrator.py   # s06 编排 + 集成
 ├── requirements.txt
@@ -105,4 +120,4 @@ pr-review-agent/
 
 ## 环境变量
 
-见 `.env.example`：`ANTHROPIC_API_KEY`、`MODEL_ID` 必填；`ANTHROPIC_BASE_URL` 可选；`REVIEW_SUBAGENT_WORKERS`（默认 4）控制并行子 Agent 数。
+见 `.env.example`：`ANTHROPIC_API_KEY`、`MODEL_ID` 必填；`ANTHROPIC_BASE_URL` 可选；`REVIEW_SUBAGENT_WORKERS`（默认 4）控制并行子 Agent；`REVIEW_API_MAX_RETRIES` 等控制限流重试。
