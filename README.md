@@ -59,6 +59,29 @@ auto 分流（须同时满足才走 legacy）：
 | `chat` | 输入 `review` 走与子 Agent 相同的分文件流程 |
 | `chat` 其它 | 交互式单 Agent，可写文件（需确认） |
 
+## 开发自测
+
+**管道单元测试**（路由 / 分块，不调用大模型）：
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest -q
+```
+
+**Golden PR 评测**（含 bug 的 fixture；pytest 只测 git 构建与打分器，不调 LLM）：
+
+```bash
+pytest tests/test_golden_fixtures.py -q
+```
+
+真实审查质量评测（需 `.env`）：
+
+```bash
+python scripts/run_golden_eval.py --all
+```
+
+见 [tests/golden/README.md](tests/golden/README.md)。
+
 ## 快速开始
 
 ```bash

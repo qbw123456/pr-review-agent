@@ -1,0 +1,18 @@
+id: obvious_none
+title: 未检查 None 导致 AttributeError
+description: |
+  main 上 greet() 有 None 检查；PR 删除该检查，对 name 直接 .upper()。
+  diff 仅为代码改动，无 BUG 注释。期望审查指出空值/None 风险。
+route_expect: legacy
+checks:
+  must_mention_files:
+    - utils.py
+  must_contain_any:
+    - "None"
+    - none
+    - 空
+    - null
+    - AttributeError
+  must_not_mention:
+    - client.py
+    - api.py

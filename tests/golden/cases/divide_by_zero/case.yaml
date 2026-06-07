@@ -1,0 +1,18 @@
+id: divide_by_zero
+title: 空列表求平均导致除零
+description: |
+  main 上 average() 有空列表检查；PR 删除该检查，空列表时 len(items)==0 会除零。
+  diff 仅为代码改动，无 BUG 注释。
+route_expect: legacy
+checks:
+  must_mention_files:
+    - calculator.py
+  must_contain_any:
+    - 除零
+    - ZeroDivision
+    - zero
+    - 空列表
+    - empty
+    - 边界
+  must_not_mention:
+    - utils.py

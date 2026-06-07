@@ -1,0 +1,22 @@
+id: cross_file_api
+title: 跨文件 API 签名变更未同步调用方
+description: |
+  api.get_user 参数从 int 改为 str；client.py 仍 get_user(1) 且 diff 中无 client 变更。
+  无 BUG 注释。期望审查发现 API 与调用方类型不一致（需主动查调用方或跨文件推理）。
+route_expect: legacy
+checks:
+  must_mention_files:
+    - api.py
+    - client.py
+  must_contain_any:
+    - 跨文件
+    - 调用
+    - 签名
+    - 类型
+    - int
+    - str
+    - 不一致
+    - client
+    - API
+  must_not_mention:
+    - calculator.py
