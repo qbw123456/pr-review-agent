@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -109,13 +110,16 @@ def build_fixture_repo(case_id: str, target: Path) -> Path:
     _run_git("git init", target)
     _run_git('git config user.email "golden@test.local"', target)
     _run_git('git config user.name "Golden Fixture"', target)
-    _run_git("git add -A", target)
+    # Disable runner/global excludes so common names like api.py are not skipped.
+    _null_excludes = "NUL" if os.name == "nt" else "/dev/null"
+    _run_git(f"git config core.excludesFile {_null_excludes}", target)
+    _run_git("git add -f -A", target)
     _run_git('git commit -m "baseline on main"', target)
     _run_git("git branch -M main", target)
 
     _copy_tree(pr_src, target)
     _run_git("git checkout -b feature", target)
-    _run_git("git add -A", target)
+    _run_git("git add -f -A", target)
     _run_git('git commit -m "PR changes with intentional bugs"', target)
 
     return target
