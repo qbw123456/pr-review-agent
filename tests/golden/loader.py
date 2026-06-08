@@ -77,6 +77,21 @@ def _run_git(cmd: str, cwd: Path) -> None:
         raise RuntimeError(f"git failed ({cmd}): {err}")
 
 
+def _assert_has_staged_changes(target: Path, case_id: str) -> None:
+    """Fail fast if pr/ copy produced nothing to commit (e.g. global gitignore)."""
+    r = subprocess.run(
+        "git diff --cached --quiet",
+        shell=True,
+        cwd=target,
+        capture_output=True,
+    )
+    if r.returncode == 0:
+        raise RuntimeError(
+            f"case {case_id!r}: no staged changes after copying pr/. "
+            "Check global gitignore or main/pr fixture content."
+        )
+
+
 def _copy_tree(src: Path, dst: Path) -> None:
     if not src.is_dir():
         return
@@ -120,6 +135,7 @@ def build_fixture_repo(case_id: str, target: Path) -> Path:
     _copy_tree(pr_src, target)
     _run_git("git checkout -b feature", target)
     _run_git("git add -f -A", target)
+    _assert_has_staged_changes(target, case_id)
     _run_git('git commit -m "PR changes with intentional bugs"', target)
 
     return target
