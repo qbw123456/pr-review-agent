@@ -43,6 +43,7 @@ from pr_review_agent.loop import agent_loop, extract_final_text
 from pr_review_agent.usage_stats import ReviewRunStats, UsageTracker, print_usage_report
 from pr_review_agent.orchestrator import run_pr_review_with_subagents
 from pr_review_agent.prompts import build_legacy_system_prompt
+from pr_review_agent.ast_context import format_caller_ast_context_block
 from pr_review_agent.review_dimensions import (
     ReviewDimension,
     build_pr_dimension_plan,
@@ -93,7 +94,13 @@ def run_review(
         api_files = plan.files_by_dimension.get(ReviewDimension.API, [])
         if api_files:
             caller_map = find_callers_for_api_files(WORKDIR, base, api_files)
-            api_block = format_api_callers_block(caller_map)
+            caller_ast_block = format_caller_ast_context_block(WORKDIR, caller_map)
+            if caller_ast_block:
+                user_content = f"{user_content}\n\n{caller_ast_block}"
+            api_block = format_api_callers_block(
+                caller_map,
+                has_caller_ast_slices=bool(caller_ast_block),
+            )
             if api_block:
                 user_content = f"{user_content}\n\n{api_block}"
 

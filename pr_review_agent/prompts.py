@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .config import WORKDIR
-from .review_dimensions import DIMENSION_LABELS, ReviewDimension
+from .review_dimensions import ChangeWeight, DIMENSION_LABELS, ReviewDimension, WEIGHT_LABELS
 
 MAX_RELATED_FILES = 2
 
@@ -40,9 +40,9 @@ _DIMENSION_FOCUS: dict[ReviewDimension, str] = {
 **本任务维度：API / 签名变更**
 - 若 diff 修改了公开函数/方法名、参数类型或个数、返回值类型、路由、共享类型或常量：
   - 用 bash（grep/rg）搜索该符号的**调用方**；
-  - 对关键调用方 `read_file`（即使不在变更列表中）；
+  - 对关键调用方核对调用是否与 API 变更新签名一致；
   - 在「发现」中**写明具体 caller 文件路径**。
-- 用户消息中若有「预检：API 符号调用方」，优先 read_file 所列路径。
+- 用户消息中若有「AST 调用方切片」，优先基于切片审查；若有「预检：API 符号调用方」路径列表，切片不足时再 read_file。
 """,
     ReviewDimension.SECURITY: """
 **本任务维度：安全**
@@ -63,6 +63,21 @@ _DIMENSION_FOCUS: dict[ReviewDimension, str] = {
 **本任务维度：文档**
 - 检查文档与代码行为是否一致、示例是否过时、关键 breaking change 是否记录。
 - 无实质问题时简要说明即可。
+""",
+}
+
+
+_WEIGHT_FOCUS: dict[ChangeWeight, str] = {
+    ChangeWeight.TRIVIAL: """
+**本簇为 trivial（注释/格式等轻量变更）**
+- 批量检查注释、文案、格式；无逻辑/安全问题则各文件简要写「无」即可。
+- diff 足够时可仅基于 patch 判断，不必 read_file 全文。
+""",
+    ChangeWeight.HEAVY: """
+**本簇为 heavy（大改或高风险删除）**
+- 必须 `read_file` 变更区域及充分上下文（大文件按 git diff 分段读取）。
+- 删除 if/raise/边界检查等防护代码须标为高风险。
+- 不得因 diff truncated 而跳过 read_file。
 """,
 }
 
@@ -108,17 +123,39 @@ def build_system_prompt() -> str:
     )
 
 
-def build_subagent_system_prompt(dimension: ReviewDimension = ReviewDimension.LOGIC) -> str:
+def build_subagent_system_prompt(
+    dimension: ReviewDimension = ReviewDimension.LOGIC,
+    weight: ChangeWeight = ChangeWeight.NORMAL,
+    *,
+    has_ast_slices: bool = False,
+) -> str:
     label = DIMENSION_LABELS.get(dimension, dimension.value)
     focus = _DIMENSION_FOCUS.get(dimension, _DIMENSION_FOCUS[ReviewDimension.LOGIC])
+    weight_block = _WEIGHT_FOCUS.get(weight, "").strip()
+    weight_section = f"{weight_block}\n\n" if weight_block else ""
+
+    if weight == ChangeWeight.TRIVIAL:
+        read_rule = (
+            "1. 本簇为 trivial 变更：优先依据 inline diff；仅当 patch 不足时再 read_file。"
+        )
+    elif has_ast_slices:
+        read_rule = (
+            "1. 用户消息已含 **AST 变更函数/类切片** 和/或 **AST 调用方切片**；"
+            "优先基于切片与 inline diff 审查（含跨文件 API 兼容性）。"
+            "仅当切片不足、需更大上下文、或文件超过约 3000 行时再 `read_file`。"
+        )
+    else:
+        read_rule = (
+            "1. 对组内每个变更文件用 `read_file` **完整**读取（除非超过约 3000 行；"
+            "此时以 `git diff` 定位变更区域后分段 read_file）。"
+        )
 
     return f"""你是位于 {WORKDIR} 的 **PR 审查子 Agent（{label}）**。
 
 每次任务审查**一组**同维度变更文件；主 Agent 仅收到你的摘要。
 
-工作流程（必须遵守）：
-1. 对组内每个变更文件用 `read_file` **完整**读取（除非超过约 3000 行；此时以 `git diff`
-   定位变更区域后分段 read_file）。
+{weight_section}工作流程（必须遵守）：
+{read_rule}
 2. 若 diff 为空、不完整或标记 truncated，通过 bash 执行
    `git diff <base>...HEAD -- <path>` 获取完整 patch。
 3. **相关文件（最多 {MAX_RELATED_FILES} 个）：** 若需跨文件上下文（尤其 API 维度），
@@ -177,8 +214,12 @@ def build_dimension_cluster_prompt(
     base: str,
     *,
     extra_context: str = "",
+    weight: ChangeWeight = ChangeWeight.NORMAL,
 ) -> str:
     label = DIMENSION_LABELS.get(dimension, dimension.value)
+    weight_note = ""
+    if weight != ChangeWeight.NORMAL:
+        weight_note = f"（{WEIGHT_LABELS[weight]} 簇）"
     blocks = []
     for path, diff_text in files:
         blocks.append(
@@ -187,7 +228,7 @@ def build_dimension_cluster_prompt(
     diffs_text = "\n\n".join(blocks)
     extra = f"\n{extra_context.strip()}\n" if extra_context else ""
 
-    return f"""审查本 PR 中下列 **{label}** 维度变更文件（base `{base}`，head `HEAD`）。
+    return f"""审查本 PR 中下列 **{label}** 维度变更文件{weight_note}（base `{base}`，head `HEAD`）。
 
 **目标文件（共 {len(files)} 个）:**
 {chr(10).join(f'- `{p}`' for p, _ in files)}

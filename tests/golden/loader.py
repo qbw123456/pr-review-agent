@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -125,16 +124,19 @@ def build_fixture_repo(case_id: str, target: Path) -> Path:
     _run_git("git init", target)
     _run_git('git config user.email "golden@test.local"', target)
     _run_git('git config user.name "Golden Fixture"', target)
-    # Disable runner/global excludes so common names like api.py are not skipped.
-    _null_excludes = "NUL" if os.name == "nt" else "/dev/null"
-    _run_git(f"git config core.excludesFile {_null_excludes}", target)
+    _run_git("git config core.autocrlf false", target)
+    empty_exclude = target / ".no-global-excludes"
+    empty_exclude.write_text("", encoding="utf-8")
+    _run_git(f'git config core.excludesFile "{empty_exclude.as_posix()}"', target)
     _run_git("git add -f -A", target)
     _run_git('git commit -m "baseline on main"', target)
     _run_git("git branch -M main", target)
 
-    _copy_tree(pr_src, target)
     _run_git("git checkout -b feature", target)
-    _run_git("git add -f -A", target)
+    _copy_tree(pr_src, target)
+    # Renormalize after copy: on Windows with global autocrlf, shutil.copy2 can leave
+    # index stat/cache out of sync so `git add -A` sees no diff (cross_file_api).
+    _run_git("git add --renormalize -f -A", target)
     _assert_has_staged_changes(target, case_id)
     _run_git('git commit -m "PR changes with intentional bugs"', target)
 

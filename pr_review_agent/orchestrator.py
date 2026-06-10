@@ -17,10 +17,9 @@ from .git_utils import (
 from .loop import agent_loop, extract_final_text
 from .prompts import build_integration_request, build_integration_system_prompt
 from .review_dimensions import (
-    DIMENSION_LABELS,
     DimensionCluster,
-    ReviewDimension,
     build_pr_dimension_plan,
+    cluster_display_label,
     format_api_callers_block,
     find_callers_for_api_files,
 )
@@ -52,10 +51,7 @@ def subagent_max_workers(override: int | None = None) -> int:
 
 
 def _cluster_label(cluster: DimensionCluster) -> str:
-    label = DIMENSION_LABELS[cluster.dimension]
-    if cluster.cluster_index:
-        return f"{label} #{cluster.cluster_index + 1}"
-    return label
+    return cluster_display_label(cluster)
 
 
 def _review_one_cluster(

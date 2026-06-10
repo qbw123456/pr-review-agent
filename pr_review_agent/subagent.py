@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from .ast_context import format_ast_context_block, format_caller_ast_context_block
 from .config import WORKDIR
 from .git_utils import diff_one_file
 from .loop import agent_loop, extract_final_text
@@ -13,9 +14,10 @@ from .prompts import (
     build_subagent_system_prompt,
 )
 from .review_dimensions import (
-    DIMENSION_LABELS,
+    ChangeWeight,
     DimensionCluster,
     ReviewDimension,
+    cluster_display_label,
     format_api_callers_block,
     find_callers_for_api_files,
 )
@@ -87,25 +89,41 @@ def run_dimension_cluster_subagent(
 ) -> tuple[str, str, UsageTracker]:
     """Review a dimension cluster (one or more files) in a fresh context."""
     dim = cluster.dimension
-    label = DIMENSION_LABELS[dim]
-    if cluster.cluster_index:
-        tracker_label = f"{dim.value}-{cluster.cluster_index}"
-        display_label = f"{label} #{cluster.cluster_index + 1}"
-    else:
-        tracker_label = dim.value
-        display_label = label
+    display_label = cluster_display_label(cluster)
+    tracker_label = (
+        f"{dim.value}-{cluster.weight.value}-{cluster.cluster_index}"
+        if cluster.cluster_index
+        else f"{dim.value}-{cluster.weight.value}"
+    )
 
     tracker = usage or UsageTracker(label=tracker_label)
     file_diffs: list[tuple[str, str]] = []
+    raw_diffs: list[tuple[str, str]] = []
     for path in cluster.files:
         raw = diff_one_file(WORKDIR, base, path)
+        raw_diffs.append((path, raw))
         embed, _ = _embed_diff(raw)
         file_diffs.append((path, embed))
 
     context = extra_context
+    has_ast_slices = False
+    if cluster.weight != ChangeWeight.TRIVIAL:
+        ast_block = format_ast_context_block(WORKDIR, raw_diffs)
+        if ast_block:
+            has_ast_slices = True
+            context = f"{context}\n\n{ast_block}".strip() if context else ast_block
     if dim == ReviewDimension.API:
         caller_map = find_callers_for_api_files(WORKDIR, base, cluster.files)
-        api_block = format_api_callers_block(caller_map)
+        caller_ast_block = format_caller_ast_context_block(WORKDIR, caller_map)
+        if caller_ast_block:
+            has_ast_slices = True
+            context = (
+                f"{context}\n\n{caller_ast_block}".strip() if context else caller_ast_block
+            )
+        api_block = format_api_callers_block(
+            caller_map,
+            has_caller_ast_slices=bool(caller_ast_block),
+        )
         if api_block:
             context = f"{context}\n\n{api_block}".strip() if context else api_block
 
@@ -114,12 +132,15 @@ def run_dimension_cluster_subagent(
         file_diffs,
         base,
         extra_context=context,
+        weight=cluster.weight,
     )
     messages = [{"role": "user", "content": prompt}]
     wall_start = time.perf_counter()
     agent_loop(
         messages,
-        system=build_subagent_system_prompt(dim),
+        system=build_subagent_system_prompt(
+            dim, weight=cluster.weight, has_ast_slices=has_ast_slices
+        ),
         tools=SUBAGENT_TOOLS,
         tool_handlers=SUBAGENT_TOOL_HANDLERS,
         verbose=verbose,
@@ -132,5 +153,8 @@ def run_dimension_cluster_subagent(
     summary = extract_final_text(messages).strip()
     if not summary:
         files_list = ", ".join(f"`{p}`" for p in cluster.files)
-        summary = f"### 维度: {label}\n\n（子 Agent 未返回摘要；文件: {files_list}）"
+        summary = (
+            f"### 维度: {display_label}\n\n"
+            f"（子 Agent 未返回摘要；文件: {files_list}）"
+        )
     return display_label, summary, tracker
