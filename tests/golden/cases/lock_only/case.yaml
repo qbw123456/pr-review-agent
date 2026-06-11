@@ -1,0 +1,19 @@
+id: lock_only
+title: 仅 lock 文件变更（无可审查源码）
+description: |
+  只有 package-lock.json 变更，无 .py 等可审查文件。
+  期望不编造源码问题；报告应说明无可审查变更或批准/无需深度审查。
+route_expect: legacy
+checks:
+  must_contain_any:
+    - 无
+    - 没有
+    - 批准
+    - 无需
+    - 未调用
+  must_not_mention:
+    - utils.py
+    - calculator.py
+    - 严重
+    - SQL
+    - 注入

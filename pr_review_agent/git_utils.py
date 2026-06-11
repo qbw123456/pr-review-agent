@@ -141,6 +141,40 @@ def build_no_changes_report(base: str = "main") -> str:
 **批准** — 无相对 `{base}` 的增量改动，无需代码审查。"""
 
 
+def build_lock_only_report(base: str = "main", *, changed_files: list[str] | None = None) -> str:
+    """Template report when only lock / non-reviewable files changed."""
+    files = changed_files or []
+    file_lines = "\n".join(f"- `{p}`" for p in files) if files else "（无）"
+    stat = ""
+    if files:
+        try:
+            stat = _cap(
+                _run_git(f"git diff {base}...HEAD --stat", Path.cwd()),
+                SECTION_MAX,
+                "diff stat",
+            )
+        except Exception:
+            stat = ""
+
+    stat_block = f"\n\n```\n{stat}\n```" if stat else ""
+
+    return f"""## 总结
+
+当前分支相对 `{base}` 仅有 **lock / 生成物** 等非源码审查类变更，无可审查的 `.py` 等源码 diff。未调用大模型。
+
+## 变更文件
+
+{file_lines}{stat_block}
+
+## 发现
+
+无
+
+## 结论
+
+**批准** — 变更为锁定文件或生成物更新，无源码逻辑需深度审查。"""
+
+
 def collect_pr_context(workdir: Path, base: str = "main") -> str:
     """Gather git context with per-file chunked diffs (no silent full-diff truncation)."""
     files = list_changed_files(workdir, base)

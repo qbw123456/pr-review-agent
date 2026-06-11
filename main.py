@@ -31,12 +31,25 @@ except ImportError:
     pass
 
 from pr_review_agent.config import WORKDIR, require_env
-from pr_review_agent.git_utils import build_no_changes_report, build_review_request, has_pr_changes
+from pr_review_agent.git_utils import (
+    build_lock_only_report,
+    build_no_changes_report,
+    build_review_request,
+    has_pr_changes,
+)
 import time
 
 from pr_review_agent.loop import agent_loop, extract_final_text
 from pr_review_agent.usage_stats import ReviewRunStats, UsageTracker, print_usage_report
 from pr_review_agent.orchestrator import run_pr_review_with_subagents
+from pr_review_agent.prompts import build_legacy_system_prompt
+from pr_review_agent.ast_context import format_caller_ast_context_block
+from pr_review_agent.review_dimensions import (
+    ReviewDimension,
+    build_pr_dimension_plan,
+    format_api_callers_block,
+    find_callers_for_api_files,
+)
 from pr_review_agent.review_strategy import (
     normalize_review_mode,
     resolve_use_legacy,
@@ -65,17 +78,38 @@ def run_review(
     use_legacy, route_reason, _n = resolve_use_legacy(base, review_mode)
 
     print(f"PR Review Agent — {run_label(use_legacy)}，对比 `{base}` @ {WORKDIR}")
-    print(f"路由: {route_reason}\n")
+    print(f"路由: {route_reason}")
+
+    plan = build_pr_dimension_plan(WORKDIR, base)
+    print(f"维度: {plan.dimension_summary()}\n")
 
     if not has_pr_changes(WORKDIR, base):
         return build_no_changes_report(base)
 
+    if plan.lock_only:
+        return build_lock_only_report(base, changed_files=plan.all_changed)
+
     if use_legacy:
-        messages = [{"role": "user", "content": build_review_request(base=base)}]
+        user_content = build_review_request(base=base)
+        api_files = plan.files_by_dimension.get(ReviewDimension.API, [])
+        if api_files:
+            caller_map = find_callers_for_api_files(WORKDIR, base, api_files)
+            caller_ast_block = format_caller_ast_context_block(WORKDIR, caller_map)
+            if caller_ast_block:
+                user_content = f"{user_content}\n\n{caller_ast_block}"
+            api_block = format_api_callers_block(
+                caller_map,
+                has_caller_ast_slices=bool(caller_ast_block),
+            )
+            if api_block:
+                user_content = f"{user_content}\n\n{api_block}"
+
+        messages = [{"role": "user", "content": user_content}]
         tracker = UsageTracker(label="legacy")
         wall_start = time.perf_counter()
         agent_loop(
             messages,
+            system=build_legacy_system_prompt(plan.active_dimensions),
             verbose=not quiet_tools,
             interactive=False,
             review_mode=True,
@@ -83,7 +117,10 @@ def run_review(
         )
         tracker.wall_sec = time.perf_counter() - wall_start
         print_usage_report(
-            ReviewRunStats(route=f"legacy（{route_reason}）", phases=[tracker])
+            ReviewRunStats(
+                route=f"legacy（{route_reason}；{plan.dimension_summary()}）",
+                phases=[tracker],
+            )
         )
         return extract_final_text(messages)
 
