@@ -49,12 +49,25 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Resolve incremental review state
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/resolve_incremental_review.py \
+            --repo "${{ github.repository }}" \
+            --pr-number "${{ github.event.pull_request.number }}" \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --previous-report-out previous-review.md
+
       - name: Run PR review agent
         id: review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MODEL_ID: ${{ secrets.MODEL_ID }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          REVIEW_SINCE_SHA: ${{ env.REVIEW_SINCE_SHA }}
+          REVIEW_PREVIOUS_REPORT: ${{ env.REVIEW_PREVIOUS_REPORT }}
         run: |
           BASE="${{ github.event.pull_request.base.ref || 'main' }}"
           python main.py review --base "${BASE}" --quiet-tools -o REVIEW.md

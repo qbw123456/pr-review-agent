@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .config import WORKDIR
 from .review_dimensions import ChangeWeight, DIMENSION_LABELS, ReviewDimension, WEIGHT_LABELS
+from .review_rules import format_review_rules_block
 
 MAX_RELATED_FILES = 2
 
@@ -36,8 +37,10 @@ _COMMON_WORKFLOW = """
 """
 
 _DIMENSION_FOCUS: dict[ReviewDimension, str] = {
-    ReviewDimension.API: """
-**本任务维度：API / 签名变更**
+    ReviewDimension.CODE: """
+**本任务维度：代码 / API / 逻辑**
+- 重点检查：边界条件、空值/None、除零、异常处理、资源泄漏、并发与状态一致性。
+- 删除防护/校验代码时须标为高风险。
 - 若 diff 修改了公开函数/方法名、参数类型或个数、返回值类型、路由、共享类型或常量：
   - 用 bash（grep/rg）搜索该符号的**调用方**；
   - 对关键调用方核对调用是否与 API 变更新签名一致；
@@ -49,20 +52,11 @@ _DIMENSION_FOCUS: dict[ReviewDimension, str] = {
 - 重点检查：认证/授权、SQL 注入、敏感数据泄露、硬编码密钥、命令注入、路径遍历。
 - 对安全相关 diff 读全上下文，勿仅看 patch 表面。
 """,
-    ReviewDimension.LOGIC: """
-**本任务维度：逻辑 / 正确性**
-- 重点检查：边界条件、空值/None、除零、异常处理、资源泄漏、并发与状态一致性。
-- 删除防护/校验代码时须标为高风险。
-""",
-    ReviewDimension.CONFIG: """
-**本任务维度：配置 / 基础设施**
-- 重点检查：环境变量、端口、镜像 tag、依赖版本、配置与代码/部署是否一致。
-- 勿编造未在 diff 中出现的源码问题。
-""",
-    ReviewDimension.DOC: """
-**本任务维度：文档**
-- 检查文档与代码行为是否一致、示例是否过时、关键 breaking change 是否记录。
-- 无实质问题时简要说明即可。
+    ReviewDimension.META: """
+**本任务维度：文档 / 配置**
+- 文档：检查与代码行为是否一致、示例是否过时、关键 breaking change 是否记录。
+- 配置/基础设施：环境变量、端口、镜像 tag、依赖版本、配置与代码/部署是否一致。
+- 无实质问题时简要说明即可；勿编造未在 diff 中出现的源码问题。
 """,
 }
 
@@ -90,9 +84,25 @@ def _focus_blocks(dimensions: list[ReviewDimension]) -> str:
     return "\n\n".join(blocks)
 
 
+def _team_rules_block(
+    dimensions: list[ReviewDimension] | None = None,
+    *,
+    weight: ChangeWeight | None = None,
+    include_all: bool = False,
+) -> str:
+    block = format_review_rules_block(
+        dimensions=dimensions,
+        weight=weight,
+        include_all=include_all,
+    )
+    if not block:
+        return ""
+    return f"\n{block}\n"
+
+
 def build_legacy_system_prompt(
     dimensions: list[ReviewDimension] | None = None,
-) -> str:
+) -> str:   
     dims = dimensions or list(ReviewDimension)
     dims = [d for d in dims if d != ReviewDimension.LOCK]
     dim_names = "、".join(DIMENSION_LABELS[d] for d in dims) if dims else "综合"
@@ -105,6 +115,7 @@ def build_legacy_system_prompt(
 {_COMMON_WORKFLOW}
 
 {_focus_blocks(dims)}
+{_team_rules_block(dims)}
 
 {FINAL_REPORT_SECTIONS}
 
@@ -119,18 +130,18 @@ def build_legacy_system_prompt(
 def build_system_prompt() -> str:
     """Legacy single-agent review (default: all dimension focuses)."""
     return build_legacy_system_prompt(
-        [ReviewDimension.API, ReviewDimension.SECURITY, ReviewDimension.LOGIC]
+        [ReviewDimension.CODE, ReviewDimension.SECURITY, ReviewDimension.META]
     )
 
 
 def build_subagent_system_prompt(
-    dimension: ReviewDimension = ReviewDimension.LOGIC,
+    dimension: ReviewDimension = ReviewDimension.CODE,
     weight: ChangeWeight = ChangeWeight.NORMAL,
     *,
     has_ast_slices: bool = False,
 ) -> str:
     label = DIMENSION_LABELS.get(dimension, dimension.value)
-    focus = _DIMENSION_FOCUS.get(dimension, _DIMENSION_FOCUS[ReviewDimension.LOGIC])
+    focus = _DIMENSION_FOCUS.get(dimension, _DIMENSION_FOCUS[ReviewDimension.CODE])
     weight_block = _WEIGHT_FOCUS.get(weight, "").strip()
     weight_section = f"{weight_block}\n\n" if weight_block else ""
 
@@ -163,6 +174,7 @@ def build_subagent_system_prompt(
 4. 不要调用 write_file / edit_file，不要 spawn 子 Agent。
 
 {focus.strip()}
+{_team_rules_block([dimension], weight=weight)}
 
 输出：仅使用简体中文 Markdown，按用户消息中的模板填写。
 须具体（文件路径、行号区域）。不要输出 "Let me analyze" 等过渡句。"""
@@ -267,6 +279,7 @@ def build_integration_system_prompt() -> str:
 4. 不得修改仓库。
 
 {FINAL_REPORT_SECTIONS}
+{_team_rules_block(include_all=True)}
 
 规则：
 - 跨文件去重；保留最高严重级别。
@@ -282,6 +295,8 @@ def build_integration_request(
     skipped_files: list[str],
     light_context: str,
     dimension_summary: str = "",
+    previous_report: str | None = None,
+    incremental_note: str = "",
 ) -> str:
     blocks = []
     for label, summary in cluster_summaries:
@@ -297,11 +312,27 @@ def build_integration_request(
         )
 
     dim_line = f"\n**审查维度划分:** {dimension_summary}\n" if dimension_summary else ""
+    inc_line = f"\n**审查模式:** {incremental_note}\n" if incremental_note else ""
+
+    previous_section = ""
+    if previous_report:
+        previous_section = f"""
+## 上次审查报告（本次 push 未重新 LLM 审查的部分）
+
+{previous_report.strip()}
+
+**合并要求（增量审查）：**
+- 子 Agent 摘要仅覆盖**本次 push 新增变更**；上方为上次完整报告。
+- 合并为一份最终 PR 报告：保留仍有效的旧发现，加入新发现；若本次修改已解决旧问题可删除或降级。
+- 「变更文件」须列出**整个 PR**（相对 `{base}` 的全部变更文件，见下方 full PR 元数据）。
+- 在总结中注明本次为增量审查。
+"""
 
     return f"""将下列分维度审查结果合并为相对 `{base}` 的**最终 PR 报告**。
-{dim_line}
+{dim_line}{inc_line}
 {skipped_section}
-## 各维度子 Agent 摘要
+{previous_section}
+## 各维度子 Agent 摘要（{"本次 push 增量" if previous_report else "全量"}）
 
 {summaries_text}
 

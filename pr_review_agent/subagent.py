@@ -6,7 +6,7 @@ import time
 
 from .ast_context import format_ast_context_block, format_caller_ast_context_block
 from .config import WORKDIR
-from .git_utils import diff_one_file
+from .git_utils import DiffScope, diff_one_file
 from .loop import agent_loop, extract_final_text
 from .prompts import (
     build_dimension_cluster_prompt,
@@ -18,6 +18,7 @@ from .review_dimensions import (
     DimensionCluster,
     ReviewDimension,
     cluster_display_label,
+    filter_api_like_files,
     format_api_callers_block,
     find_callers_for_api_files,
 )
@@ -44,7 +45,7 @@ def run_file_review_subagent(
     *,
     verbose: bool = True,
     usage: UsageTracker | None = None,
-    dimension: ReviewDimension = ReviewDimension.LOGIC,
+    dimension: ReviewDimension = ReviewDimension.CODE,
     extra_context: str = "",
 ) -> tuple[str, UsageTracker]:
     """Review one changed file in a fresh context; return (summary, usage stats)."""
@@ -86,6 +87,7 @@ def run_dimension_cluster_subagent(
     verbose: bool = True,
     usage: UsageTracker | None = None,
     extra_context: str = "",
+    scope: DiffScope | None = None,
 ) -> tuple[str, str, UsageTracker]:
     """Review a dimension cluster (one or more files) in a fresh context."""
     dim = cluster.dimension
@@ -100,7 +102,7 @@ def run_dimension_cluster_subagent(
     file_diffs: list[tuple[str, str]] = []
     raw_diffs: list[tuple[str, str]] = []
     for path in cluster.files:
-        raw = diff_one_file(WORKDIR, base, path)
+        raw = diff_one_file(WORKDIR, base, path, scope=scope)
         raw_diffs.append((path, raw))
         embed, _ = _embed_diff(raw)
         file_diffs.append((path, embed))
@@ -112,8 +114,11 @@ def run_dimension_cluster_subagent(
         if ast_block:
             has_ast_slices = True
             context = f"{context}\n\n{ast_block}".strip() if context else ast_block
-    if dim == ReviewDimension.API:
-        caller_map = find_callers_for_api_files(WORKDIR, base, cluster.files)
+    api_like_files = filter_api_like_files(WORKDIR, base, cluster.files, scope=scope)
+    if api_like_files:
+        caller_map = find_callers_for_api_files(
+            WORKDIR, base, api_like_files, scope=scope
+        )
         caller_ast_block = format_caller_ast_context_block(WORKDIR, caller_map)
         if caller_ast_block:
             has_ast_slices = True

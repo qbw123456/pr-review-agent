@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pr_review_agent.ast_context import (
+    class_names_with_init_changed,
     extract_caller_slices_for_symbol,
     extract_slices_for_file,
     find_slices_for_lines,
@@ -111,6 +112,44 @@ def test_extract_caller_slice_fetch_demo_user(tmp_path):
     assert slices[0].related_symbol == "get_user"
     assert "get_user(1)" in slices[0].source
     assert "from api import get_user" not in slices[0].source
+
+
+def test_find_symbol_reference_lines_for_class_instantiation():
+    source = "from svc import UserService\n\n\ndef build() -> UserService:\n    return UserService(1)\n"
+    lines = find_symbol_reference_lines(source, "client.py", "UserService")
+    assert any(line for line in lines)
+
+
+def test_class_names_with_init_changed(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "svc.py").write_text(
+        "class UserService:\n"
+        "    def __init__(self, user_id: int):\n"
+        "        self.user_id = user_id\n",
+        encoding="utf-8",
+    )
+    diff = """\
+@@ -1,3 +1,3 @@
+ class UserService:
+-    def __init__(self, user_id: int):
++    def __init__(self, user_id: str):
+         self.user_id = user_id
+"""
+    assert class_names_with_init_changed(repo, "svc.py", diff) == ["UserService"]
+
+
+def test_extract_caller_slice_for_class_usage(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "client.py").write_text(
+        "from svc import UserService\n\n\ndef build() -> UserService:\n    return UserService(1)\n",
+        encoding="utf-8",
+    )
+    slices = extract_caller_slices_for_symbol(repo, "client.py", "UserService")
+    assert len(slices) == 1
+    assert slices[0].name == "build"
+    assert "UserService(1)" in slices[0].source
 
 
 def test_cross_file_api_caller_ast_golden(tmp_path):

@@ -179,6 +179,51 @@ def _grep_symbol_call_lines(source: str, symbol: str) -> set[int]:
     return found
 
 
+def _grep_class_reference_lines(source: str, class_name: str) -> set[int]:
+    escaped = re.escape(class_name)
+    patterns = (
+        re.compile(rf"\b{escaped}\s*\("),
+        re.compile(rf"\bisinstance\s*\([^)]*\b{escaped}\b"),
+        re.compile(rf"\bissubclass\s*\([^)]*\b{escaped}\b"),
+        re.compile(rf"\bimport\s+{escaped}\b"),
+    )
+    found: set[int] = set()
+    for index, line in enumerate(source.splitlines(), 1):
+        if any(p.search(line) for p in patterns):
+            found.add(index)
+    return found
+
+
+def _class_reference_lines_from_ast(source: str, path: str, class_name: str) -> set[int]:
+    lines: set[int] = set()
+    try:
+        tree = ast.parse(source, filename=path)
+    except SyntaxError:
+        return lines
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == class_name:
+                lines.add(int(node.lineno))
+            elif isinstance(node.func, ast.Attribute) and node.func.attr == class_name:
+                lines.add(int(node.lineno))
+            elif isinstance(node.func, ast.Name) and node.func.id in {"isinstance", "issubclass"}:
+                for arg in node.args[1:]:
+                    if isinstance(arg, ast.Name) and arg.id == class_name:
+                        lines.add(int(node.lineno))
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if bound == class_name:
+                    lines.add(int(node.lineno))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if bound == class_name:
+                    lines.add(int(node.lineno))
+    return lines
+
+
 def _call_matches_symbol(func: ast.expr, symbol: str) -> bool:
     if isinstance(func, ast.Name) and func.id == symbol:
         return True
@@ -186,7 +231,7 @@ def _call_matches_symbol(func: ast.expr, symbol: str) -> bool:
 
 
 def find_symbol_reference_lines(source: str, path: str, symbol: str) -> set[int]:
-    """Line numbers in *source* where *symbol* is invoked (AST, grep fallback)."""
+    """Line numbers in *source* where *symbol* is invoked or referenced (AST, grep fallback)."""
     if not symbol or not source.strip():
         return set()
 
@@ -194,7 +239,10 @@ def find_symbol_reference_lines(source: str, path: str, symbol: str) -> set[int]
     try:
         tree = ast.parse(source, filename=path)
     except SyntaxError:
-        return _grep_symbol_call_lines(source, symbol)
+        lines = _grep_symbol_call_lines(source, symbol)
+        if not lines:
+            lines = _grep_class_reference_lines(source, symbol)
+        return lines
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _call_matches_symbol(node.func, symbol):
@@ -202,7 +250,47 @@ def find_symbol_reference_lines(source: str, path: str, symbol: str) -> set[int]
 
     if not lines:
         lines = _grep_symbol_call_lines(source, symbol)
+
+    class_lines = _class_reference_lines_from_ast(source, path, symbol)
+    if not class_lines:
+        class_lines = _grep_class_reference_lines(source, symbol)
+    lines |= class_lines
+
     return lines
+
+
+def class_names_with_init_changed(workdir: Path, path: str, diff: str) -> list[str]:
+    """Return class names whose __init__ body/signature overlaps diff changed lines."""
+    changed = parse_diff_new_line_numbers(diff)
+    if not changed:
+        return []
+
+    file_path = workdir / path
+    if not file_path.is_file() or not _is_python_path(path):
+        return []
+
+    source = file_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        tree = ast.parse(source, filename=path)
+    except SyntaxError:
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for item in node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if item.name != "__init__":
+                continue
+            end = int(getattr(item, "end_lineno", None) or item.lineno)
+            if any(item.lineno <= line_no <= end for line_no in changed):
+                if node.name not in seen:
+                    seen.add(node.name)
+                    names.append(node.name)
+    return names
 
 
 def extract_caller_slices_for_symbol(

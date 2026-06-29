@@ -73,7 +73,7 @@ def test_auto_subagent_too_many_files(mock_list, mock_diff, tmp_path: Path):
 def test_auto_subagent_oversized_single_file(mock_list, mock_diff, tmp_path: Path):
     mock_list.return_value = ["big.py", "small.py"]
 
-    def fake_diff(_wd, _base, path):
+    def fake_diff(_wd, _base, path, **kwargs):
         return "D" * (PER_FILE_MAX + 1) if path == "big.py" else "ok"
 
     mock_diff.side_effect = fake_diff

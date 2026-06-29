@@ -16,15 +16,15 @@ from pr_review_agent.review_dimensions import (
 
 def _make_plan_with_files(files: list[str]) -> PRDimensionPlan:
     clusters = [
-        DimensionCluster(dimension=ReviewDimension.LOGIC, files=[f], cluster_index=i)
+        DimensionCluster(dimension=ReviewDimension.CODE, files=[f], cluster_index=i)
         for i, f in enumerate(files)
     ]
     return PRDimensionPlan(
         base="main",
         all_changed=files,
         reviewable_files=files,
-        files_by_dimension={ReviewDimension.LOGIC: files},
-        active_dimensions=[ReviewDimension.LOGIC],
+        files_by_dimension={ReviewDimension.CODE: files},
+        active_dimensions=[ReviewDimension.CODE],
         lock_only=False,
         clusters=clusters,
     )
