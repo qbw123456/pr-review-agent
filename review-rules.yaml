@@ -1,0 +1,52 @@
+# Team PR review rules — curated from human feedback on bot false positives / misses.
+# Loaded at review time and injected into agent system prompts.
+# Override path: REVIEW_RULES_PATH env var.
+
+rules:
+  - id: changed-files-only
+    dimensions: [code, security, meta]
+    text: |
+      仅对本次 PR 实际变更的文件发表评论。
+      未出现在 diff / 变更列表中的路径不得编造问题。
+
+  - id: lock-only-scope
+    dimensions: [lock]
+    text: |
+      仅审查依赖版本、lockfile integrity、生成物一致性。
+      不得对未变更的业务源码提逻辑、安全或风格问题。
+
+  - id: trivial-no-nitpicks
+    dimensions: [code]
+    weights: [trivial]
+    text: |
+      trivial（注释/格式/文案）变更：无逻辑或安全问题则各文件简要写「无」。
+      不要报 docstring、命名偏好、行宽等风格类建议。
+
+  - id: meta-no-source-fabrication
+    dimensions: [meta]
+    text: |
+      文档/配置维度：只审配置与文档一致性。
+      勿对 diff 中未出现的源码文件编造 bug。
+
+  - id: api-caller-required
+    dimensions: [code]
+    weights: [normal, heavy]
+    text: |
+      公开 API（函数签名、路由、共享类型）变更时，
+      若存在调用方风险，发现中须写明具体 caller 文件路径，或明确写「未验证调用方」。
+
+negative_examples:
+  - id: lock-fabricated-security
+    dimensions: [lock]
+    bad: "警告：package-lock.json 变更可能导致 SQL 注入"
+    reason: lock-only PR 不要编造业务源码安全问题。
+
+  - id: unmodified-file-finding
+    dimensions: [code, security]
+    bad: "警告：client.py 缺少输入校验"
+    reason: client.py 未在变更列表中，不得对其报源码问题。
+
+  - id: trivial-docstring-nit
+    dimensions: [code]
+    bad: "建议：为仅改注释的函数补充 docstring"
+    reason: trivial 注释变更不要追加 docstring/风格类建议。

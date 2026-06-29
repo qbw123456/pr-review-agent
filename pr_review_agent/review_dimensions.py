@@ -13,6 +13,7 @@ from .ast_context import find_symbol_reference_lines
 from .git_utils import (
     PER_FILE_MAX,
     SKIP_INLINE_SUBSTRINGS,
+    DiffScope,
     diff_one_file,
     is_reviewable_file,
     list_changed_files,
@@ -26,20 +27,16 @@ TRIVIAL_MAX_MEANINGFUL_LINES = 2
 
 class ReviewDimension(str, Enum):
     LOCK = "lock"
-    DOC = "doc"
-    CONFIG = "config"
-    API = "api"
+    META = "meta"
+    CODE = "code"
     SECURITY = "security"
-    LOGIC = "logic"
 
 
 DIMENSION_LABELS: dict[ReviewDimension, str] = {
     ReviewDimension.LOCK: "Lock / 生成物",
-    ReviewDimension.DOC: "文档",
-    ReviewDimension.CONFIG: "配置 / 基础设施",
-    ReviewDimension.API: "API / 签名",
+    ReviewDimension.META: "文档 / 配置",
+    ReviewDimension.CODE: "代码 / API / 逻辑",
     ReviewDimension.SECURITY: "安全",
-    ReviewDimension.LOGIC: "逻辑 / 正确性",
 }
 
 
@@ -55,10 +52,8 @@ WEIGHT_LABELS: dict[ChangeWeight, str] = {
     ChangeWeight.HEAVY: "heavy",
 }
 
-_DIMENSIONS_NEVER_TRIVIAL = frozenset({ReviewDimension.API, ReviewDimension.SECURITY})
-_DIMENSIONS_TRIVIAL_ELIGIBLE = frozenset(
-    {ReviewDimension.LOGIC, ReviewDimension.DOC, ReviewDimension.CONFIG}
-)
+_DIMENSIONS_NEVER_TRIVIAL = frozenset({ReviewDimension.SECURITY})
+_DIMENSIONS_TRIVIAL_ELIGIBLE = frozenset({ReviewDimension.CODE, ReviewDimension.META})
 
 _GUARD_DELETE_PATTERNS = (
     re.compile(r"^-.*\bif\b.*\bNone\b", re.MULTILINE | re.IGNORECASE),
@@ -68,11 +63,9 @@ _GUARD_DELETE_PATTERNS = (
 
 # Priority when merging / displaying (higher risk first).
 DIMENSION_PRIORITY: tuple[ReviewDimension, ...] = (
-    ReviewDimension.API,
     ReviewDimension.SECURITY,
-    ReviewDimension.LOGIC,
-    ReviewDimension.CONFIG,
-    ReviewDimension.DOC,
+    ReviewDimension.CODE,
+    ReviewDimension.META,
     ReviewDimension.LOCK,
 )
 
@@ -123,10 +116,22 @@ def is_lock_file(path: str) -> bool:
     return any(skip in lower for skip in SKIP_INLINE_SUBSTRINGS)
 
 
-def _looks_like_api_change(diff: str) -> bool:
+def is_api_like_change(diff: str) -> bool:
+    """True if diff touches function/class/route signatures (triggers caller preflight)."""
     if not diff:
         return False
     return any(p.search(diff) for p in _API_DIFF_PATTERNS)
+
+
+def _is_meta_path(path: str) -> bool:
+    lower = path.lower().replace("\\", "/")
+    if lower.endswith(".md"):
+        return True
+    if lower.endswith((".yaml", ".yml", ".toml", ".env", ".env.example")):
+        return True
+    if lower.endswith(".json") and "lock" not in lower:
+        return True
+    return lower.endswith(("dockerfile",)) or "docker-compose" in lower
 
 
 def _looks_like_security(path: str, diff: str) -> bool:
@@ -144,28 +149,16 @@ def classify_file(path: str, diff: str = "") -> ReviewDimension:
     if is_lock_file(path):
         return ReviewDimension.LOCK
 
-    if lower.endswith(".md"):
-        return ReviewDimension.DOC
-
-    if lower.endswith((".yaml", ".yml", ".toml", ".env", ".env.example")):
-        return ReviewDimension.CONFIG
-
-    if lower.endswith(".json") and "lock" not in lower:
-        return ReviewDimension.CONFIG
-
-    if lower.endswith(("dockerfile",)) or "docker-compose" in lower:
-        return ReviewDimension.CONFIG
-
     if _looks_like_security(path, diff):
         return ReviewDimension.SECURITY
 
-    if _looks_like_api_change(diff):
-        return ReviewDimension.API
+    if _is_meta_path(path):
+        return ReviewDimension.META
 
     if is_reviewable_file(path):
-        return ReviewDimension.LOGIC
+        return ReviewDimension.CODE
 
-    return ReviewDimension.CONFIG
+    return ReviewDimension.META
 
 
 def _diff_meaningful_lines(diff: str) -> list[str]:
@@ -223,7 +216,7 @@ def classify_change_weight(
         len(diff) > PER_FILE_MAX
         or meaningful_count > HEAVY_LINE_THRESHOLD
         or deletes_guard(diff)
-        or _looks_like_api_change(diff)
+        or is_api_like_change(diff)
     ):
         return ChangeWeight.HEAVY
 
@@ -238,11 +231,9 @@ def classify_change_weight(
 
 
 def heavy_needs_solo_cluster(path: str, diff: str) -> bool:
-    """Heavy files that must not share a cluster with other files."""
+    """Solo heavy cluster only for oversized diffs; guard deletes batch with other heavy."""
     _ = path
-    if len(diff) > HEAVY_SOLO_DIFF_CHARS:
-        return True
-    return deletes_guard(diff)
+    return len(diff) > HEAVY_SOLO_DIFF_CHARS
 
 
 def cluster_max_files() -> int:
@@ -283,6 +274,7 @@ class PRDimensionPlan:
     active_dimensions: list[ReviewDimension]
     lock_only: bool
     clusters: list[DimensionCluster] = field(default_factory=list)
+    scope: DiffScope = field(default_factory=lambda: DiffScope())
 
     def dimension_summary(self) -> str:
         parts = []
@@ -333,16 +325,18 @@ def _build_clusters(
     *,
     workdir: Path | None = None,
     base: str = "main",
+    scope: DiffScope | None = None,
     diffs_by_path: dict[str, str] | None = None,
 ) -> list[DimensionCluster]:
     max_per = cluster_max_files()
     clusters: list[DimensionCluster] = []
+    s = scope or DiffScope(base=base)
 
     def _diff_for(path: str) -> str:
         if diffs_by_path is not None and path in diffs_by_path:
             return diffs_by_path[path]
         if workdir is not None:
-            return diff_one_file(workdir, base, path)
+            return diff_one_file(workdir, base, path, scope=s)
         return ""
 
     for dim in DIMENSION_PRIORITY:
@@ -409,16 +403,26 @@ def _build_clusters(
     return clusters
 
 
-def build_pr_dimension_plan(workdir: Path, base: str = "main") -> PRDimensionPlan:
-    all_changed = list_changed_files(workdir, base)
-    reviewable = list_reviewable_changed_files(workdir, base)
+def build_pr_dimension_plan(
+    workdir: Path,
+    base: str = "main",
+    *,
+    scope: DiffScope | None = None,
+) -> PRDimensionPlan:
+    s = scope or DiffScope(base=base)
+    all_changed = list_changed_files(workdir, base, scope=s)
+    reviewable = list_reviewable_changed_files(workdir, base, scope=s)
 
     files_by_dimension: dict[ReviewDimension, list[str]] = {
         d: [] for d in ReviewDimension
     }
 
     for path in all_changed:
-        diff = diff_one_file(workdir, base, path) if is_reviewable_file(path) else ""
+        diff = (
+            diff_one_file(workdir, base, path, scope=s)
+            if is_reviewable_file(path)
+            else ""
+        )
         dim = classify_file(path, diff)
         files_by_dimension[dim].append(path)
 
@@ -433,25 +437,159 @@ def build_pr_dimension_plan(workdir: Path, base: str = "main") -> PRDimensionPla
         files_by_dimension=files_by_dimension,
         active_dimensions=active,
         lock_only=len(reviewable) == 0 and len(all_changed) > 0,
+        scope=s,
     )
     plan.clusters = _build_clusters(
         files_by_dimension,
         workdir=workdir,
         base=base,
+        scope=s,
     )
     return plan
 
 
-def extract_api_symbols_from_diff(diff: str) -> list[str]:
-    names: list[str] = []
-    seen: set[str] = set()
-    for match in _DEF_NAME_RE.finditer(diff):
-        name = match.group(1)
-        if name.startswith("_") or name in seen:
+@dataclass(frozen=True)
+class PreflightSymbol:
+    """Symbol to grep + AST-slice when checking cross-file impact."""
+
+    name: str
+    kind: str  # "function" | "class" | "legacy_class"
+
+
+def _is_public_symbol(name: str) -> bool:
+    return bool(name) and not name.startswith("_")
+
+
+def _extract_signed_defs(diff: str) -> tuple[dict[str, str], dict[str, str]]:
+    removed: dict[str, str] = {}
+    added: dict[str, str] = {}
+    for raw in diff.splitlines():
+        if raw.startswith(("+++", "---")):
             continue
+        if not raw.startswith(("+", "-")):
+            continue
+        match = re.match(r"[+-]\s*(?:async\s+)?def\s+(\w+)\s*\(", raw)
+        if not match:
+            continue
+        name = match.group(1)
+        body = raw[1:].strip()
+        if raw.startswith("-"):
+            removed[name] = body
+        elif raw.startswith("+"):
+            added[name] = body
+    return removed, added
+
+
+def _extract_class_decls(diff: str) -> tuple[dict[str, str], dict[str, str]]:
+    removed: dict[str, str] = {}
+    added: dict[str, str] = {}
+    for raw in diff.splitlines():
+        if raw.startswith(("+++", "---")):
+            continue
+        if not raw.startswith(("+", "-")):
+            continue
+        match = re.match(r"[+-]\s*class\s+(\w+)\s*(?:\([^)]*\))?\s*:?", raw)
+        if not match:
+            continue
+        name = match.group(1)
+        body = raw[1:].strip()
+        if raw.startswith("-"):
+            removed[name] = body
+        elif raw.startswith("+"):
+            added[name] = body
+    return removed, added
+
+
+def _init_signature_changed(py_removed: dict[str, str], py_added: dict[str, str]) -> bool:
+    if "__init__" not in py_removed and "__init__" not in py_added:
+        return False
+    if "__init__" in py_removed and "__init__" not in py_added:
+        return True
+    if "__init__" in py_added and "__init__" not in py_removed:
+        return True
+    return py_removed["__init__"] != py_added["__init__"]
+
+
+def _class_names_for_init_change(workdir: Path, path: str, diff: str) -> list[str]:
+    from .ast_context import class_names_with_init_changed
+
+    return class_names_with_init_changed(workdir, path, diff)
+
+
+def extract_preflight_symbols(
+    diff: str,
+    path: str = "",
+    workdir: Path | None = None,
+) -> list[PreflightSymbol]:
+    """Symbols whose callers/users should be prefetched (functions + breaking class changes)."""
+    if not diff:
+        return []
+
+    symbols: list[PreflightSymbol] = []
+    seen: set[str] = set()
+
+    def add(name: str, kind: str) -> None:
+        if not _is_public_symbol(name) or name in seen:
+            return
         seen.add(name)
-        names.append(name)
-    return names
+        symbols.append(PreflightSymbol(name=name, kind=kind))
+
+    py_removed, py_added = _extract_signed_defs(diff)
+    cls_removed, cls_added = _extract_class_decls(diff)
+
+    for name, old_sig in py_removed.items():
+        if name == "__init__":
+            continue
+        if name not in py_added or py_added[name] != old_sig:
+            add(name, "function")
+
+    for name, new_sig in py_added.items():
+        if name == "__init__":
+            continue
+        if name not in py_removed or py_removed[name] != new_sig:
+            add(name, "function")
+
+    for name, old_sig in cls_removed.items():
+        if name not in cls_added:
+            add(name, "legacy_class")
+        elif cls_added[name] != old_sig:
+            add(name, "class")
+
+    if _init_signature_changed(py_removed, py_added):
+        for name in set(cls_removed) | set(cls_added):
+            add(name, "class")
+        if workdir is not None and path:
+            for name in _class_names_for_init_change(workdir, path, diff):
+                add(name, "class")
+
+    return symbols
+
+
+def needs_caller_preflight(diff: str) -> bool:
+    """True when cross-file caller / class-user preflight should run."""
+    if is_api_like_change(diff):
+        return True
+    return bool(extract_preflight_symbols(diff))
+
+
+def filter_api_like_files(
+    workdir: Path,
+    base: str,
+    files: list[str],
+    *,
+    scope: DiffScope | None = None,
+) -> list[str]:
+    """Return paths whose diff needs caller / class-user preflight."""
+    api_like: list[str] = []
+    for path in files:
+        diff = diff_one_file(workdir, base, path, scope=scope)
+        if needs_caller_preflight(diff):
+            api_like.append(path)
+    return api_like
+
+
+def extract_api_symbols_from_diff(diff: str) -> list[str]:
+    return [sym.name for sym in extract_preflight_symbols(diff)]
 
 
 def _run_grep(workdir: Path, pattern: str) -> str:
@@ -475,6 +613,42 @@ def _run_grep(workdir: Path, pattern: str) -> str:
     return ""
 
 
+def _grep_patterns_for_symbol(symbol: str, kind: str) -> list[str]:
+    escaped = re.escape(symbol)
+    if kind == "function":
+        return [rf"\b{escaped}\s*\("]
+    return [
+        rf"\b{escaped}\s*\(",
+        rf"\bimport\s+{escaped}\b",
+        rf"\bisinstance\s*\([^)]*\b{escaped}\b",
+        rf"\bissubclass\s*\([^)]*\b{escaped}\b",
+    ]
+
+
+def _grep_callers_for_symbol(
+    workdir: Path,
+    symbol: PreflightSymbol,
+    exclude_path: str,
+) -> list[str]:
+    callers: list[str] = []
+    for pattern in _grep_patterns_for_symbol(symbol.name, symbol.kind):
+        raw = _run_grep(workdir, pattern)
+        for line in raw.splitlines():
+            rel = line.strip().lstrip("./").replace("\\", "/")
+            if not rel or rel == exclude_path:
+                continue
+            if rel.endswith(_SYMBOL_FILE_SUFFIXES) and rel not in callers:
+                callers.append(rel)
+    if not callers:
+        callers = _python_search_symbol_files(
+            workdir,
+            symbol.name,
+            exclude_path,
+            symbol_kind=symbol.kind,
+        )
+    return callers
+
+
 _SYMBOL_FILE_SUFFIXES = (".py", ".js", ".ts", ".tsx", ".jsx")
 
 
@@ -482,10 +656,14 @@ def _python_search_symbol_files(
     workdir: Path,
     symbol: str,
     exclude_path: str,
+    *,
+    symbol_kind: str = "function",
 ) -> list[str]:
     """Walk repo when rg/grep unavailable; return paths that reference *symbol*."""
     exclude = exclude_path.replace("\\", "/")
-    word = re.compile(rf"\b{re.escape(symbol)}\b")
+    patterns = [
+        re.compile(p) for p in _grep_patterns_for_symbol(symbol, symbol_kind)
+    ]
     callers: list[str] = []
 
     for path in workdir.rglob("*"):
@@ -501,7 +679,7 @@ def _python_search_symbol_files(
         if rel.endswith(".py"):
             if find_symbol_reference_lines(text, rel, symbol):
                 callers.append(rel)
-        elif word.search(text):
+        elif any(p.search(text) for p in patterns):
             callers.append(rel)
     return callers
 
@@ -510,25 +688,23 @@ def find_callers_for_api_files(
     workdir: Path,
     base: str,
     api_files: list[str],
+    *,
+    scope: DiffScope | None = None,
 ) -> dict[str, list[str]]:
     """Return map symbol -> caller file paths (repo-relative, excluding defining file)."""
     result: dict[str, list[str]] = {}
     for path in api_files:
-        diff = diff_one_file(workdir, base, path)
-        for symbol in extract_api_symbols_from_diff(diff):
-            raw = _run_grep(workdir, symbol)
-            callers: list[str] = []
-            for line in raw.splitlines():
-                rel = line.strip().lstrip("./").replace("\\", "/")
-                if not rel or rel == path:
-                    continue
-                if rel.endswith(_SYMBOL_FILE_SUFFIXES):
-                    if rel not in callers:
-                        callers.append(rel)
+        diff = diff_one_file(workdir, base, path, scope=scope)
+        for symbol in extract_preflight_symbols(diff, path, workdir):
+            callers = _grep_callers_for_symbol(workdir, symbol, path)
             if not callers:
-                callers = _python_search_symbol_files(workdir, symbol, path)
-            if callers:
-                result[symbol] = callers[:10]
+                continue
+            existing = result.get(symbol.name, [])
+            merged: list[str] = list(existing)
+            for caller in callers:
+                if caller not in merged:
+                    merged.append(caller)
+            result[symbol.name] = merged[:10]
     return result
 
 
@@ -539,7 +715,7 @@ def format_api_callers_block(
 ) -> str:
     if not caller_map:
         return ""
-    lines = ["## 预检：API 符号调用方（自动 grep，供审查参考）", ""]
+    lines = ["## 预检：API / class 符号引用方（自动 grep，供审查参考）", ""]
     for symbol, paths in sorted(caller_map.items()):
         lines.append(f"- `{symbol}` → " + ", ".join(f"`{p}`" for p in paths))
     lines.append("")

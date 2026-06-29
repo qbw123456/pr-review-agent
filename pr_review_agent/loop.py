@@ -16,6 +16,7 @@ from .usage_stats import UsageTracker
 DEFAULT_API_MAX_RETRIES = 5
 DEFAULT_API_RETRY_BASE_SEC = 10.0
 DEFAULT_API_RETRY_MAX_SEC = 120.0
+DEFAULT_REVIEW_TEMPERATURE = 0.0
 
 _RATE_LIMIT_HINTS = (
     "rate limit",
@@ -46,6 +47,18 @@ def _api_retry_settings() -> tuple[int, float, float]:
     except ValueError:
         max_delay = DEFAULT_API_RETRY_MAX_SEC
     return max(0, max_retries), max(1.0, base_delay), max(base_delay, max_delay)
+
+
+def review_temperature() -> float:
+    """LLM sampling temperature for review (default 0.0 — stable, low hallucination)."""
+    raw = os.getenv("REVIEW_TEMPERATURE", "").strip()
+    if not raw:
+        return DEFAULT_REVIEW_TEMPERATURE
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_REVIEW_TEMPERATURE
+    return max(0.0, min(1.0, value))
 
 
 def _is_retryable_api_error(exc: BaseException) -> bool:
@@ -131,6 +144,7 @@ def agent_loop(
             messages=messages,
             tools=tools,
             max_tokens=8000,
+            temperature=review_temperature(),
         )
         messages.append({"role": "assistant", "content": response.content})
 

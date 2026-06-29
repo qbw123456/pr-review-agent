@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from .config import WORKDIR
-from .git_utils import PER_FILE_MAX, diff_one_file, list_reviewable_changed_files
+from .git_utils import PER_FILE_MAX, DiffScope, diff_one_file, list_reviewable_changed_files
 
 ReviewMode = Literal["auto", "legacy", "subagent"]
 
@@ -41,10 +41,12 @@ def _oversized_diff_for_legacy(
     workdir: Path,
     base: str,
     files: list[str],
+    *,
+    scope: DiffScope | None = None,
 ) -> tuple[str, int] | None:
     """First reviewable path whose diff exceeds PER_FILE_MAX (inline cap), or None."""
     for path in files:
-        size = len(diff_one_file(workdir, base, path))
+        size = len(diff_one_file(workdir, base, path, scope=scope))
         if size > PER_FILE_MAX:
             return path, size
     return None
@@ -55,12 +57,13 @@ def resolve_use_legacy(
     mode: ReviewMode,
     *,
     workdir: Path | None = None,
+    scope: DiffScope | None = None,
 ) -> tuple[bool, str, int]:
     """
     Return (use_legacy, reason_for_user, reviewable_file_count).
     """
     workdir = workdir or WORKDIR
-    files = list_reviewable_changed_files(workdir, base)
+    files = list_reviewable_changed_files(workdir, base, scope=scope)
     n = len(files)
     threshold = legacy_max_files()
 
@@ -75,7 +78,7 @@ def resolve_use_legacy(
             f"auto → subagent（{n} 个可审查文件 > {threshold}）",
             n,
         )
-    oversized = _oversized_diff_for_legacy(workdir, base, files)
+    oversized = _oversized_diff_for_legacy(workdir, base, files, scope=scope)
     if oversized is not None:
         path, size = oversized
         return (

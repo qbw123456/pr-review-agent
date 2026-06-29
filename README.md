@@ -50,6 +50,8 @@ auto 分流（须同时满足才走 legacy）：
 - **手动覆盖**：`--mode legacy` / `--mode subagent`（`--legacy-single-agent` 等同 legacy）
 - **API 限流重试**：`agent_loop` 对 `messages.create` 自动退避重试（见 `REVIEW_API_*` 环境变量）
 - **usage 统计**：审查结束打印每阶段 calls/tokens/耗时（`REVIEW_LOG_USAGE`，子 Agent 并行完成行也会带简要数据）
+- **团队规则**：`review-rules.yaml` 注入 system prompt（正向 rules + 负向 negative_examples，来自人工反馈沉淀）
+- **增量审查**：PR 更新时仅 LLM 审查 `since_sha..HEAD` 新增 diff，并与上次 PR 评论合并（评论内 `<!-- pr-review-agent:last_sha=... -->` 标记）
 
 ### s03 权限行为
 
@@ -118,6 +120,7 @@ Secrets：`ANTHROPIC_API_KEY`、`MODEL_ID`；可选 `ANTHROPIC_BASE_URL`（智�
 ```
 pr-review-agent/
 ├── main.py
+├── review-rules.yaml       # 团队审查规则（rules + negative_examples）
 ├── pr_review_agent/
 │   ├── config.py
 │   ├── loop.py
@@ -126,12 +129,38 @@ pr-review-agent/
 │   ├── prompts.py
 │   ├── git_utils.py
 │   ├── review_strategy.py  # auto / legacy / subagent 分流
+│   ├── review_dimensions.py  # 分维 / 聚簇 / 预检
+│   ├── review_rules.py     # 加载 review-rules.yaml
 │   ├── usage_stats.py      # token / 耗时汇总
-│   ├── subagent.py       # s06 单文件审查
-│   └── orchestrator.py   # s06 编排 + 集成
+│   ├── subagent.py       # 维度簇子 Agent
+│   └── orchestrator.py   # 编排 + 集成
 ├── requirements.txt
 └── .github/workflows/pr-review.yml
 ```
+
+### 团队规则（review-rules.yaml）
+
+人工在 PR 中发现 Bot **误报 / 漏报** 后，维护者将结论写入仓库根目录 `review-rules.yaml`：
+
+- **rules**：须遵守的正向规则（可按 `dimensions` / `weights` 过滤）
+- **negative_examples**：具体误报样例 + 原因（避免重复犯错）
+
+审查时自动注入 legacy / 子 Agent / 集成 Agent 的 system prompt。自定义路径：`REVIEW_RULES_PATH`。
+
+示例：lock-only PR 只审依赖；trivial 注释改动不报 docstring；未变更文件不得编造问题（与 golden `must_not_mention` 互补——golden 测回归，yaml 管运行时）。
+
+### 增量审查（PR push 后）
+
+默认开启（`REVIEW_INCREMENTAL=1`）。GitHub Actions 会从**上一条** PR 评论读取 `<!-- pr-review-agent:last_sha=... -->`：
+
+| 场景 | 行为 |
+|------|------|
+| 首次 review | 全 PR `base...HEAD` |
+| 再次 push | 仅 `last_sha..HEAD` 跑子 Agent；集成 Agent 合并上次报告 |
+| 本次 push 无文件变更 | 沿用上次报告，更新 SHA 标记 |
+| rebase / force-push 导致 SHA 不可达 | 回退全量 `base...HEAD` |
+
+手动：`python main.py review --since-sha <sha> --previous-report old.md`；强制全量：`--full-review` 或 `REVIEW_FULL=1`。
 
 ## 后续扩展
 
@@ -143,4 +172,4 @@ pr-review-agent/
 
 ## 环境变量
 
-见 `.env.example`：`ANTHROPIC_API_KEY`、`MODEL_ID` 必填；`ANTHROPIC_BASE_URL` 可选；`REVIEW_SUBAGENT_WORKERS`（默认 4）控制并行子 Agent；`REVIEW_API_MAX_RETRIES` 等控制限流重试。
+见 `.env.example`：`ANTHROPIC_API_KEY`、`MODEL_ID` 必填；`ANTHROPIC_BASE_URL` 可选；`REVIEW_SUBAGENT_WORKERS`（默认 4）控制并行子 Agent；`REVIEW_API_MAX_RETRIES` 等控制限流重试；`REVIEW_RULES_PATH` 可选覆盖团队规则文件。

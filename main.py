@@ -32,6 +32,7 @@ except ImportError:
 
 from pr_review_agent.config import WORKDIR, require_env
 from pr_review_agent.git_utils import (
+    DiffScope,
     build_lock_only_report,
     build_no_changes_report,
     build_review_request,
@@ -41,12 +42,16 @@ import time
 
 from pr_review_agent.loop import agent_loop, extract_final_text
 from pr_review_agent.usage_stats import ReviewRunStats, UsageTracker, print_usage_report
-from pr_review_agent.orchestrator import run_pr_review_with_subagents
+from pr_review_agent.orchestrator import finalize_review_report, run_pr_review_with_subagents
 from pr_review_agent.prompts import build_legacy_system_prompt
+from pr_review_agent.incremental_review import (
+    build_no_incremental_delta_report,
+    resolve_incremental_state,
+)
 from pr_review_agent.ast_context import format_caller_ast_context_block
 from pr_review_agent.review_dimensions import (
-    ReviewDimension,
     build_pr_dimension_plan,
+    filter_api_like_files,
     format_api_callers_block,
     find_callers_for_api_files,
 )
@@ -72,28 +77,73 @@ def run_review(
     legacy_flag: bool = False,
     quiet_tools: bool = False,
     workers: int | None = None,
+    since_sha: str | None = None,
+    force_full: bool = False,
+    previous_report: str | None = None,
 ) -> str:
     """Run PR review; returns Markdown report text."""
+    incremental = resolve_incremental_state(
+        base,
+        since_sha=since_sha,
+        previous_report=previous_report,
+        force_full=force_full,
+    )
+    scope = incremental.scope
+    full_scope = DiffScope(base=base)
+
     review_mode = normalize_review_mode(mode, legacy_flag=legacy_flag)
-    use_legacy, route_reason, _n = resolve_use_legacy(base, review_mode)
+    use_legacy, route_reason, _n = resolve_use_legacy(
+        base, review_mode, scope=scope
+    )
 
     print(f"PR Review Agent — {run_label(use_legacy)}，对比 `{base}` @ {WORKDIR}")
     print(f"路由: {route_reason}")
+    print(f"审查模式: {incremental.mode_label}")
 
-    plan = build_pr_dimension_plan(WORKDIR, base)
+    if not has_pr_changes(WORKDIR, base, scope=full_scope):
+        return finalize_review_report(build_no_changes_report(base), incremental)
+
+    if scope.is_incremental and not has_pr_changes(WORKDIR, base, scope=scope):
+        assert incremental.since_sha
+        return finalize_review_report(
+            build_no_incremental_delta_report(
+                base=base,
+                since_sha=incremental.since_sha,
+                head_sha=incremental.head_sha,
+                previous_report=incremental.previous_report,
+            ),
+            incremental,
+        )
+
+    plan = build_pr_dimension_plan(WORKDIR, base, scope=scope)
     print(f"维度: {plan.dimension_summary()}\n")
 
-    if not has_pr_changes(WORKDIR, base):
-        return build_no_changes_report(base)
-
     if plan.lock_only:
-        return build_lock_only_report(base, changed_files=plan.all_changed)
+        return finalize_review_report(
+            build_lock_only_report(base, changed_files=plan.all_changed),
+            incremental,
+        )
 
     if use_legacy:
-        user_content = build_review_request(base=base)
-        api_files = plan.files_by_dimension.get(ReviewDimension.API, [])
-        if api_files:
-            caller_map = find_callers_for_api_files(WORKDIR, base, api_files)
+        user_content = build_review_request(base=base, scope=scope)
+        if scope.is_incremental and incremental.previous_report:
+            user_content = (
+                f"**增量审查模式：** {incremental.mode_label}\n\n"
+                f"## 上次审查报告（本次 push 未重新审查的文件）\n\n"
+                f"{incremental.previous_report.strip()}\n\n"
+                f"---\n\n"
+                f"## 本次 push 增量 diff\n\n"
+                f"{user_content}\n\n"
+                f"请合并上一份报告与本次增量审查，输出相对 `{base}` 的**完整 PR 报告**"
+                f"（变更文件须覆盖整个 PR，不仅是本次 push）。"
+            )
+        api_like_files = filter_api_like_files(
+            WORKDIR, base, plan.reviewable_files, scope=scope
+        )
+        if api_like_files:
+            caller_map = find_callers_for_api_files(
+                WORKDIR, base, api_like_files, scope=scope
+            )
             caller_ast_block = format_caller_ast_context_block(WORKDIR, caller_map)
             if caller_ast_block:
                 user_content = f"{user_content}\n\n{caller_ast_block}"
@@ -116,17 +166,22 @@ def run_review(
             usage=tracker,
         )
         tracker.wall_sec = time.perf_counter() - wall_start
+        route_suffix = "增量" if scope.is_incremental else route_reason
         print_usage_report(
             ReviewRunStats(
-                route=f"legacy（{route_reason}；{plan.dimension_summary()}）",
+                route=f"legacy（{route_suffix}；{plan.dimension_summary()}）",
                 phases=[tracker],
             )
         )
-        return extract_final_text(messages)
+        return finalize_review_report(extract_final_text(messages), incremental)
 
-    return run_pr_review_with_subagents(
-        base, verbose=not quiet_tools, max_workers=workers
+    report = run_pr_review_with_subagents(
+        base,
+        verbose=not quiet_tools,
+        max_workers=workers,
+        incremental=incremental,
     )
+    return finalize_review_report(report, incremental)
 
 
 def cmd_review(
@@ -137,13 +192,23 @@ def cmd_review(
     mode: str,
     legacy_flag: bool,
     workers: int | None,
+    since_sha: str | None,
+    force_full: bool,
+    previous_report: Path | None,
 ) -> int:
+    prev_text = None
+    if previous_report and previous_report.is_file():
+        prev_text = previous_report.read_text(encoding="utf-8")
+
     report = run_review(
         base,
         mode=mode,
         legacy_flag=legacy_flag,
         quiet_tools=quiet_tools,
         workers=workers,
+        since_sha=since_sha,
+        force_full=force_full,
+        previous_report=prev_text,
     )
     _write_report(report, output)
     return 0
@@ -215,6 +280,23 @@ def main() -> int:
             "env REVIEW_SUBAGENT_WORKERS; use 1 for serial)"
         ),
     )
+    review_p.add_argument(
+        "--since-sha",
+        default=None,
+        metavar="SHA",
+        help="Incremental review: only diff since this commit (env REVIEW_SINCE_SHA)",
+    )
+    review_p.add_argument(
+        "--full-review",
+        action="store_true",
+        help="Disable incremental review; re-review entire PR diff",
+    )
+    review_p.add_argument(
+        "--previous-report",
+        type=Path,
+        default=None,
+        help="Previous report Markdown for incremental merge (env REVIEW_PREVIOUS_REPORT)",
+    )
 
     sub.add_parser("chat", help="Interactive chat with review tools")
 
@@ -229,6 +311,9 @@ def main() -> int:
             mode=args.mode,
             legacy_flag=args.legacy_single_agent,
             workers=args.workers,
+            since_sha=args.since_sha,
+            force_full=args.full_review,
+            previous_report=args.previous_report,
         )
     if args.command == "chat":
         return cmd_chat()
