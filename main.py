@@ -124,6 +124,9 @@ def run_review(
             incremental,
         )
 
+    if plan.lock_only:
+        return build_lock_only_report(base, changed_files=plan.all_changed)
+
     if use_legacy:
         user_content = build_review_request(base=base, scope=scope)
         if scope.is_incremental and incremental.previous_report:
